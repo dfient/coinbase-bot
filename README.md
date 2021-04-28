@@ -38,4 +38,4 @@ Will be released under a flexible open source license.
 
 ### Questions
 
-Questions, ideas, feedback? Check out Issues and Wiki here at GitHub first, email at dfient@protonmail.ch for direct contact.
+Questions, ideas, feedback? Check out Issues and Wiki here at GitHub first, email at dfient@protonmail.ch for direct contact. (Releasing this under pseudonym.)
