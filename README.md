@@ -7,8 +7,9 @@ This is a semi-automatic trading bot, improving the capabilities of Coinbase Pro
 1. Monitor multiple products and get buy signals via SMS to your phone
 1. Place OCO (one cancels other) orders: Cancels stoploss and replaces with buy at target price
 1. Automate trading, e.g. buy every morning at 7 and sell at set target %
-1. Downloads price (ticker) history to Postgres for local analysis
-1. Framework for auto-trading, e.g. using exponential moving averages or other signals
+1. Downloads price (ticker) history to PostgreSQL for local analysis
+1. Backtest your algorithm towards historic price data (from PostgreSQL)
+3. Framework for auto-trading, e.g. using exponential moving averages or other signals
 
 This is very much work in progress, and requires quite high technical proficiency to be useful, but I am posting here to 
 make this available and gather community feedback and input. Currently I am reorganizing the code, commenting and making
