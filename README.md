@@ -60,7 +60,7 @@ If trades fail, the system aborts with unhandled exceptions. Many regularly call
 
 ### Contributing
 
-Small or big, all contributions are welcome.
+Small or big, all contributions are welcome. Simply submit PRs.
 
 
 ### Use at your own risk
