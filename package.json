@@ -1,0 +1,39 @@
+{
+  "name": "coinbase-bot",
+  "version": "0.0.1",
+  "description": "coinbase trading bot",
+  "main": "trade.js",
+  "dependencies": {
+    "bluebird": "^3.7.2",
+    "cli-color": "^2.0.0",
+    "coinbase-pro": "^0.9.0",
+    "mathjs": "^9.3.2",
+    "pg": "^8.5.1",
+    "pino": "^6.11.2",
+    "prompt": "^1.1.0",
+    "redis": "^3.0.2",
+    "twilio": "^3.59.0",
+    "uuid": "^8.3.2",
+    "yargs": "^16.2.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dfient/coinbase-bot"
+  },
+  "keywords": [
+    "bitcoin",
+    "trading",
+    "coinbase",
+    "trading-bot",
+    "hft"
+  ],
+  "author": "dfient@protonmail.ch",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/dfient/coinbase-bot/issues"
+  },
+  "homepage": "https://github.com/dfient/coinbase-bot"
+}

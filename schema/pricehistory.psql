@@ -1,0 +1,14 @@
+create table if not exists pricehistory (
+    product varchar(20) not null, 
+    time timestamp not null, 
+    open numeric not null, 
+    high numeric not null, 
+    low numeric not null, 
+    close numeric not null, 
+    volume numeric not null
+    );
+
+create table if not exists syncstatus (
+    product varchar(20) not null,
+    lastentry timestamp not null
+);
