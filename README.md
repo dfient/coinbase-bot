@@ -58,6 +58,11 @@ Currently the tools do not optimize for Coinbase's maker/taker fee structure. Th
 If trades fail, the system aborts with unhandled exceptions. Many regularly called functions have failbacks to handle e.g. connection issues or the like. Monitor log files using your preferred system and keep Coinbase app on you to clean up asap. Nice hint is to follow your bot using the exchange web interface or mobile app. You can manually cancel stoploss orders, effectively turning buy into HODL until target is reached.
 
 
+### Contributing
+
+Small or big, all contributions are welcome.
+
+
 ### Use at your own risk
 
 This project comes with _*zero warranties*_. Use at your own risk and with funds you can afford to lose, also due to technical errors like bugs, hickups, system faults, upgrades, iaas failures, lightning strikes, act of god. This system is designed for speed+performance, not with high availability/redundancy in mind.
