@@ -57,10 +57,14 @@ Currently the tools do not optimize for Coinbase's maker/taker fee structure. Th
 
 If trades fail, the system aborts with unhandled exceptions. Many regularly called functions have failbacks to handle e.g. connection issues or the like. Monitor log files using your preferred system and keep Coinbase app on you to clean up asap. Nice hint is to follow your bot using the exchange web interface or mobile app. You can manually cancel stoploss orders, effectively turning buy into HODL until target is reached.
 
+There is currently an issue with linebreaks, new version is underway with fixes. Also adding signatures for commits.
+
 
 ### Contributing
 
 Small or big, all contributions are welcome. Simply submit PRs.
+
+Want to keep me running this project? Coffee keeps me awake, coding away. Litecoin (LTC) donations welcome to MT51Zx5i6iPm13ikJM7taPctRxungu4BP3.
 
 
 ### Use at your own risk
@@ -77,4 +81,4 @@ This project is released under the MIT License. Copyright 2021 dfient@protonmail
 
 ### Questions
 
-Questions, ideas, feedback? Check out Issues and Wiki here at GitHub first, email at dfient@protonmail.ch for direct contact.
+Questions, ideas, feedback? Check out Issues and Wiki here at GitHub first, email at dfient@protonmail.ch for direct contact, optionally encrypted with [my PGP key](https://gist.github.com/dfient/ee3c204f9d4fb1aab17536a530639ded).

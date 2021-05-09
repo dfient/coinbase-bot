@@ -5,10 +5,12 @@ create table if not exists pricehistory (
     high numeric not null, 
     low numeric not null, 
     close numeric not null, 
-    volume numeric not null
+    volume numeric not null,
+    granularity numeric not null
     );
 
 create table if not exists syncstatus (
     product varchar(20) not null,
-    lastentry timestamp not null
+    lastentry timestamp not null,
+    granularity numeric not null
 );
