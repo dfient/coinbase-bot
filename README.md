@@ -85,7 +85,7 @@ Auto-trade builds on the monitoring framework, and will start a trade when the c
 
 The bot will only take one position at a time, spending the full budget (specified as a parameter and does not need to be your full account balance). If multiple products hit the price target at the same time, it will take a position in the product with the highest volatility.
 
-__Important: The included algorithm is too weak and must be enhanced; in many cases it "catch falling knives". Edit the code and add your own algorithm if you want to use `auto`. Future updates will have more signals and indicators and object oriented abstractions in the code to make implementing your favorite algorithm easier (e.g. buying ema crossovers, using an RSI strategy, or similar).__
+__Important: The included algorithm is too weak and must be enhanced; in many cases it "catches falling knives". Edit the code and add your own algorithm if you want to use `auto`. Future updates will have more signals and indicators and object oriented abstractions in the code to make implementing your favorite algorithm easier (e.g. buying ema crossovers, using an RSI strategy, or similar).__
 
 I highly recommend using `monitor` and then manual technical analysis before acting on the signal manually (instead of `auto` mode).
 
@@ -153,10 +153,11 @@ indicators, plus a much improved technical architecture for durability.
 
 ## Getting started
 
-1. Make sure redis and postgres is installed
+1. Make sure redis, postgres, and nodejs is installed
    ```
    sudo apt install redis
    sudo apt install postgres
+   <install node, e.g. using nvm>
    ```
 2. Create a database and setup the schema in postgres
    ```
@@ -171,7 +172,6 @@ indicators, plus a much improved technical architecture for durability.
 4. Give execute permissions to the scripts for convenience
    ```
    chmod +x server.js prices.js trade.js
-   ./trade.js --help
    ```
 5. Start the server to connect to Coinbase' websocket and cache info in Redis
    ```
@@ -188,13 +188,13 @@ indicators, plus a much improved technical architecture for durability.
    ```
 8. Try analyzing a single product
    ```
-   ./trade.js limit XLM-EUR --limit 0.01 --budget 10.00 --target 1.0 --stoploss 0.5 --verbose --disable-sms
+   ./trade.js analyze XLM-EUR --periods 30 --granularity 86400
    ```
-9. Set up monitoring of all your products
+9. Set up monitoring of all your products on the minute candlesticks
    ```
-   ./trade.js limit XLM-EUR --limit 0.01 --budget 10.00 --target 1.0 --stoploss 0.5 --verbose --disable-sms
+   ./trade.js analyze all --periods 100 --granularity 60 --disable-sms
    ```
-1. Install screen to ensure your server and trades run even if SSH gets disconnected
+1. Install screen to ensure your server and trades run even if your terminal gets disconnected
    ```
    sudo apt install screen
    screen ./trade.js <options here>
@@ -224,10 +224,9 @@ If you are using the auto or monitor modes, place your server in Amazon US East 
 
 ## Contributing
 
-Small or big, all contributions are welcome. Simply submit PRs.
-
 Can't code or no time, but want me to keep running this project? Coffee keeps me awake, coding away. Litecoin (LTC) donations welcome to MT51Zx5i6iPm13ikJM7taPctRxungu4BP3 to keep my caffeine intake high.
 
+Can code, test, write docs? Small or big, all contributions are welcome. Simply submit PRs.
 
 
 ## Use at your own risk
