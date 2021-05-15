@@ -15,10 +15,10 @@ Based on Node.js, Redis, and Postgres. Developed and tested on Ubuntu Linux (but
 Currently available features:
 
 
-1. Automate trading, e.g. buy every morning at 7 and sell at set target %
+1. Automate trading, e.g. buy every morning at 7 for dollar cost averaging in or out of a crypto product
 1. Place OCO (one cancels other) orders: Cancels stoploss and replaces with buy at target price. Coinbase Pro does not support OCO orders, this functionality makes it easier to successfully execute intraday or swing trade strategies.
 1. Monitor multiple products' price and trend and get buy signals via SMS to your phone
-1. Download price (ticker) history to PostgreSQL for local analysis
+1. Download price (ticker) history to PostgreSQL for local analysis e.g. in Excel, Tableau or PowerBI
 1. Framework for auto-trading, e.g. using exponential moving averages or other signals
 
 To learn all the options, run `./trade.js --help`.
@@ -47,7 +47,7 @@ Note: There is no guarantee that the take profit (limit) order finds a match, e.
 
 ### Monitoring for tradability
 
-The bot can watching the markets across multiple products and let you know via a text message when the price is at an acceptable level for a product that satisfied the "tradability" signals.
+The bot can watch the markets across multiple products and let you know via a text message when the price is at an acceptable level for a product that satisfied the "tradability" signals.
 
 ```
   ./trade.js monitor all --volatility 2.5 --periods 10 --granularity 86400 --ema1 12 --ema2 26
@@ -137,6 +137,7 @@ indicators, plus a much improved technical architecture for durability.
 * Linux server*. 
 * Redis
 * Postgres
+* NodeJS
 * Twilio Account for SMS notifications
 
 
@@ -153,58 +154,68 @@ indicators, plus a much improved technical architecture for durability.
 
 ## Getting started
 
-1. Make sure redis, postgres, and nodejs is installed
+1. Make sure redis, postgres, screen, and nodejs is installed
    ```
    sudo apt install redis
    sudo apt install postgres
-   <install node, e.g. using nvm>
+   sudo apt install screen
+
+   # install nvm and then node.js
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.38.0/install.sh | bash
+   nvm install
    ```
-2. Create a database and setup the schema in postgres
+1. Clone this repository and download dependencies (if you haven't already)
+   ```
+   git clone https://github.com/dfient/coinbase-bot.git
+   cd ./coinbase-bot
+   npm install
+   ```
+1. Create a database and setup the schema in postgres
    ```
    psql -c "create database coinbasebot"
    psql -d coinbasebot -f `./schema/pricehistory.psql`
    ```
-3. Configure the system with api-keys, twilio and database settings
+1. Configure the system with api-keys, twilio and database settings
    ```
    cp apikeys_template.js apikeys.js
    nano apikeys.js
    ```
-4. Give execute permissions to the scripts for convenience
+1. Give execute permissions to the scripts for convenience
    ```
    chmod +x server.js prices.js trade.js
    ```
-5. Start the server to connect to Coinbase' websocket and cache info in Redis
+1. Start the server to connect to Coinbase' websocket and cache info in Redis. The server must be running at all times.
    ```
-   ./server.js safe
+   screen ./server.js safe
+   # hit Ctrl-D A to disconnect from the screen and the app continues in the background.
    ```
    ./server.js accepts two parameters, `start` which just runs the server, and `safe` which starts the server as a child process, and watches for any abnormal exits/crashes and restarts the server to keep it going. Most users should use `safe`, advanced users may have better ways of doing this.
-6. Learn how to use ./trade.js
+1. Learn how to use ./trade.js
    ```
    ./trade.js --help
    ```
-7. Try your first trade with a very small budget
+1. Try your first trade with a very small budget
    ```
-   ./trade.js limit XLM-EUR --limit 0.01 --budget 10.00 --target 1.0 --stoploss 0.5 --verbose --disable-sms
+   ./trade.js limit XLM-EUR --limit 0.01 --budget 10.00 --target 0.01 --stoploss 0.01 --verbose --disable-sms
    ```
-8. Try analyzing a single product
+   This order will hit the target or the stoploss very soon. Due to fees, the trade will be unprofitable. (Most users must see gains >1.0% to get a profit due to fees.) When running with higher --target percentages, use `screen ./trade.js <options>` to enable the trade to run in the background for the hours or days or weeks the trade will take.
+
+   There is currently no way to disable the stoploss, so watch out, set it high enough to avoid volatility forcing a loss.
+1. Try analyzing a single product
    ```
    ./trade.js analyze XLM-EUR --periods 30 --granularity 86400
    ```
-9. Set up monitoring of all your products on the minute candlesticks
+1. Set up monitoring of all your products on the minute candlesticks
    ```
-   ./trade.js analyze all --periods 100 --granularity 60 --disable-sms
+   ./trade.js monitor all --periods 100 --granularity 60 --disable-sms
    ```
-1. Install screen to ensure your server and trades run even if your terminal gets disconnected
+   Again, use `screen ./trade.js <options>` to keep running over longer periods of time. Remove `--disable-sms` to enable notifications via Twilio to your phone. Note that Twilio fees can be significant if you are monitoring e.g. 60s or 1m candles and have settings that frequently signal tradability. There is a circuit break that stops Twilio messages if more than 50 messages is sent in an hour, this can catch coding errors that would otherwise lead to excessive charges. Can be adjusted by setting `MAX_MESSAGES_PER_INTERVAL` in `twilio.js`.
+1. Learn how to reconnect to a running process with screen
    ```
-   sudo apt install screen
-   screen ./trade.js <options here>
-
-   Do Ctrl-D + A to disconnect from the screen
-
    screen -list
-   screen -r
+   screen -r <id>
    ```
-1. Monitor console output and log*.json for details.
+1. Monitor console output and log*.json for details. Set up some system for log monitoring, use `tail -f log.json` at first.
 
 _Hint:_ Use cron or at to schedule e.g. price sync or trading
 
