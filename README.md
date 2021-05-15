@@ -12,7 +12,7 @@ Based on Node.js, Redis, and Postgres. Developed and tested on Ubuntu Linux (but
 
 ## Features
 
-Currently available features:
+Currently available features in Alpha 1:
 
 
 1. Automate trading, e.g. buy every morning at 7 for dollar cost averaging in or out of a crypto product
