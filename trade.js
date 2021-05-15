@@ -1197,7 +1197,7 @@ function parseCommandLine()
 		})
 		.option('days', {
 			description: 'Number of days to analyze price history for',
-			alias: 'd',
+			alias: ['d','periods'],
 			type: 'number',
 			default: 10
 		})
@@ -1267,7 +1267,7 @@ function parseCommandLine()
 		})
 		.option('days', {
 			description: 'Number of days to analyze price history for',
-			alias: 'd',
+			alias: ['d','periods'],
 			type: 'number',
 			default: 10
 		})
@@ -1296,7 +1296,7 @@ function parseCommandLine()
 			alias: 'ema2'
 		})
 		.option('volatility', {
-			description: 'Minimum volatility for trading, e.g. 2.0 (%)',
+			description: 'Minimum volatility for trading, e.g. 2.5 (%)',
 			type: 'number',
 			default: 2.5
 		})
@@ -1333,7 +1333,7 @@ function parseCommandLine()
 		})
 		.option('days', {
 			description: 'Number of days to get price history for',
-			alias: 'd',
+			alias: ['d','periods'],
 			type: 'number',
 			default: 10
 		})
@@ -1377,7 +1377,7 @@ function parseCommandLine()
 		})
 		.option('days', {
 			description: 'Number of days to analyze price history for',
-			alias: 'd',
+			alias: ['d','periods'],
 			type: 'number',
 			default: 10
 		})
