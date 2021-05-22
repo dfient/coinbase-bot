@@ -40,7 +40,7 @@ You can also initiate the trade at market price, which means you start the trade
   ./trade.js market ADA-EUR --budget 10 --target 3.0 --stoploss 1.0
 ```
 
-This will buy ADA for €10, and use same stoposs and take profit rules as above.
+This will buy ADA for €10, and use same stoploss and take profit rules as above.
 
 Note: There is no guarantee that the take profit (limit) order finds a match, e.g. if the price spikes very momentarily. The bot does not have a fallback for this at the moment (a future version should let the order stay open for e.g. 2 minutes, then cancel it and replace the stop order).
 
@@ -207,10 +207,20 @@ indicators, plus a much improved technical architecture for durability.
    ```
 1. Set up monitoring of all your products on the minute candlesticks
    ```
-   ./trade.js monitor all --periods 100 --granularity 60 --disable-sms
+   ./trade.js monitor --periods 100 --granularity 60 --disable-sms
    ```
    Again, use `screen ./trade.js <options>` to keep running over longer periods of time. Remove `--disable-sms` to enable notifications via Twilio to your phone. Note that Twilio fees can be significant if you are monitoring e.g. 60s or 1m candles and have settings that frequently signal tradability. There is a circuit break that stops Twilio messages if more than 50 messages is sent in an hour, this can catch coding errors that would otherwise lead to excessive charges. Can be adjusted by setting `MAX_MESSAGES_PER_INTERVAL` in `twilio.js`.
-1. Learn how to reconnect to a running process with screen
+1. Get some ticker data that you can analyse in your Excel or your favorite tool
+   ```
+   ./trade.js prices ADA-EUR --periods 20 --granularity 86400 --ema1 12 --ema2 26 --movavgperiods 10
+   ```
+   This will output the last 20 daily candles with calculated simple moving average over 10 periods for close, low, and high prices, as well as Exponential Moving Average on close for 12 and 26 periods (days). The output can be pasted into Excel for further analysis. Use `--raw` to get output in JSON format. This function is retrieving data live from Coinbase, so you are restricted to 300 periods until a future version where data will be pulled from the database.
+1. Sync price history to the database.
+   ```
+   ./prices.js sync ETH-EUR --granularity 900 --startDate 2021-1-1
+   ```
+   This will download 15m candles for all of 2021 into the `pricehistory` table in postgres. Keep this up-to-date by running `./prices.js sync ETH-EUR --granularity 900` which will run an incremental update, you can e.g. sync once a day or every quarter to have "live data". You can now connect to the database from your favorite tools to run custom analysis. Downloading e.g. 1 minute candles for the entire history of Bitcoin will take significant time, so make sure you use `screen`. The bot handles throttling to not overload the Coinbase limits; do not run multiple price syncs simultaneously as this will exhaust your request limit and lead to Coinbase blocking your ip-address for some time.
+1. Learn how to reconnect to a running process with screen to see your server (that is running in the background since step 6 of this tutorial).
    ```
    screen -list
    screen -r <id>
