@@ -12,8 +12,16 @@ Based on Node.js, Redis, and Postgres. Developed and tested on Ubuntu Linux (but
 
 ## Features
 
-Currently available features in Alpha 1:
+New features in Alpha 2:
 
+1. Track positions. Every opened position is tracked in the database with buy price, and later sell price and result. Positions make trading multiple crypto products easier, helps with tracking results, and is a framework for tax reporting.
+1. Command-line buy/sell (as opposted to trades that try to take profit and without tracking the position)
+1. Included first version of proper [Documentation](./docs/index.md)
+1. Improved stability, logging and error handling
+1. Note: System now relies on Redis and Postgres and server.js to be running for stability, durability, flexibility
+
+
+Features from Alpha 1:
 
 1. Automate trading, e.g. buy every morning at 7 for dollar cost averaging in or out of a crypto product
 1. Place OCO (one cancels other) orders: Cancels stoploss and replaces with buy at target price. Coinbase Pro does not support OCO orders, this functionality makes it easier to successfully execute intraday or swing trade strategies.
@@ -21,28 +29,42 @@ Currently available features in Alpha 1:
 1. Download price (ticker) history to PostgreSQL for local analysis e.g. in Excel, Tableau or PowerBI
 1. Framework for auto-trading, e.g. using exponential moving averages or other signals
 
+
 To learn all the options, run `./trade.js --help`.
 
 Read the Getting Started section below before you execute any of the commands documented here in the Features section.
 
 
-### Trading
 
-```
-  ./trade.js limit ADA-EUR --limit 1.0 --budget 10 --target 3.0 --stoploss 1.0
-```
+### Trading and tracking positions
 
-Will place an order for 10 ADA at €1 each. When (if) the order fills, the bot will place a stoploss order at the exchange at -1.0% (0.9€). If the price hits +3.0% (€1.03), the stoploss order will be cancelled and a sell (limit) order will be placed at 1.03.
+If you trade actively, positions will help you track your trades across multiple products, better track your gains/losses, and have a framework for tax reporting on your results. Positions can be opened and closed manually, you can set take profit and/or stop loss levels, or a time at which the position will be closed automatically (e.g. end of trading day).
 
-You can also initiate the trade at market price, which means you start the trade immediately. Can be used e.g. with a crontab job to initiate an intraday strategy every morning at 7 AM:
+![Screenshot showing list of positions](https://github.com/dfient/coinbase-bot/raw/main/docs/img/list-positions.png "List of positions")
+ 
+You can run individual trades and manual buy/sell operations in addition to your positions, but take care to not touch the part of your account currently 'owned' by open positions. Best practice is to use positions only.
 
-```
-  ./trade.js market ADA-EUR --budget 10 --target 3.0 --stoploss 1.0
-```
+`./trade.js open market ADA-EUR --name my-first-cardano --budget 10` will buy ADA for €10 and hodl.
 
-This will buy ADA for €10, and use same stoploss and take profit rules as above.
+If --name is not specified, the bot will create a short unique identifier, e.g. `41xzipduq`
 
-Note: There is no guarantee that the take profit (limit) order finds a match, e.g. if the price spikes very momentarily. The bot does not have a fallback for this at the moment (a future version should let the order stay open for e.g. 2 minutes, then cancel it and replace the stop order).
+`./trade.js list-positions all` will list your positions and results according to current market price.
+
+`./trade.js adjust my-first-cardano --take-profit 10%` will set a take-profit target on the Cardano position you just created.
+
+`./trade.js adjust my-first-cardano --stop-loss 25%` will set a stop-loss on the Cardano position you just created.
+
+`./trade.js close market my-first-cardano` will close (sell) the position at market price.
+
+`./trade.js panic` will close (sell) all open positions at market price, must be run with `--force` to execute the sells.
+
+You can also easily export your trade history and all results by using `./trade.js list-positions closed` and use the data to create your tax reports.
+
+I recommend using positions over untracked buy/sell or the Coinbase UI, as you will get a much improved overview of your current exposure in the market. It is especially useful if you trade multiple products.
+
+List exports support pretty print (default), CSV and JSON with the `--csv` and `--raw` options.
+
+
 
 
 ### Monitoring for tradability
@@ -75,6 +97,7 @@ You can analyze any single product at any time using:
 Note: `analyze`, `monitor`, and `auto` download live price data from Coinbase. There is a limitation of maximum 300 candles per api call, so --periods for these functions are limited to max 300 until a future version where candlestick data will be fetched from the postgres database for these functions.
 
 
+
 ### Auto-trading
 
 Auto-trade builds on the monitoring framework, and will start a trade when the current market price is at or below the short EMA (default is 12 candles), and take profit or stop loss at a specified percentage.
@@ -91,43 +114,40 @@ I highly recommend using `monitor` and then manual technical analysis before act
 
 
 
-## Coming: Alpha 2 version (soon to be released)
+### Trading (without tracking positions)
 
-I'm working on the final steps of Alpha 2 with several improvements across the codebase, and the following major features:
+```
+  ./trade.js limit ADA-EUR --limit 1.0 --budget 10 --target 3.0 --stoploss 1.0
+```
 
-1. Track positions. Every opened position is tracked in the database with buy price (and later sell price). This builds a framework
-   for easier tax reporting. Each position can have a target price and/or stop loss to be automatically closed if the market
-   reaches the thresholds.
-1. Command-line buy/sell (as opposted to trades that try to take profit and without tracking the position)
-1. Improving stability, logging and error handling
+Will place an order for 10 ADA at €1 each. When (if) the order fills, the bot will place a stoploss order at the exchange at -1.0% (0.9€). If the price hits +3.0% (€1.03), the stoploss order will be canceled and a sell (limit) order will be placed at 1.03.
 
+You can also initiate the trade at market price, which means you start the trade immediately. Can be used e.g. with a crontab job to initiate an intraday strategy every morning at 7 AM:
 
+```
+  ./trade.js market ADA-EUR --budget 10 --target 3.0 --stoploss 1.0
+```
 
-### Working with positions
+This will buy ADA for €10, and use same stoploss and take profit rules as above.
 
-`./trade.js open market ADA-EUR --name my-first-cardano --budget 10` will buy ADA for €10 and hodl.
-
-If --name is not specified, the bot will create a short unique identifier, e.g. `41xzipduq`
-
-`./trade.js list-positions open` will list all open positions and results according to current market price.
-
-`./trade.js close market --name my-first-cardano` will close (sell) the position at market price.
-
-`./trade.js panic --force` will close (sell) all open positions at market price.
-
-You can also easily export your trade history and all results by using `./trade.js list-positions closed` and use the data to create your tax reports.
-
-I recommend using positions over untracked buy/sell or the Coinbase UI, as you will get a much improved overview of your current exposure in the market. It is especially useful if you trade multiple products.
-
-List exports support pretty print (default), CSV and JSON with the `--csv` and `--raw` options.
+Note: There is no guarantee that the take profit (limit) order finds a match, e.g. if the price spikes very momentarily. The bot does not have a fallback for this at the moment (a future version should let the order stay open for e.g. 2 minutes, then cancel it and replace the stop order).
 
 
 
-## Planned: Alpha 3 version
+## Coming: Alpha 3 version
 
 Incorporating TA-Lib to enhance the `./trade.js analyze ADA-EUR` function with more signals and indicators. Building UI to monitor positions with easy
 overview of important indicators; also making the `monitor` and `auto` (trading bot) modes easier to use to leverage advanced
 indicators, plus a much improved technical architecture for durability.
+
+
+## Planned: Alpha 4 version
+
+Implementing `open soft` for positions. This will not place a buy order at the exchange, but monitor the currency for the price target. If the price drops below the set limit, a buy order is placed with the exchange, provided there are sufficient funds in the account. This lets you place orders to "buy the dip" for multiple currencies at the same time (because funds are not put in hold by the exchange), and buy the first product that matches your criteria. Others 'soft opened' orders will be left pending until funds are available in the account, e.g. after your first soft open meets its profit target and closes.)
+
+Implementing `--open-at` for positions, making it possible to place buy orders into the future, e.g. at a specific date and time. This can be used as part of a dollar-cost-averaging strategy. It can be combined with --close-at to automatically sell the position at a later time - e.g. buying at market price every day at 7 AM, selling at 3 PM.
+
+Smaller improvements: More notifications and extensibility in the platform to help you ensure it runs well and to help you code your own extensions.
 
 
 
@@ -146,7 +166,7 @@ indicators, plus a much improved technical architecture for durability.
 
 |Script|Description|
 |---|---|
-|server.js|Monitors tickers, orders, and products and publishes information through Redis cache and pub/sub. Must be running. Start with `node server.js --safe`|
+|server.js|Monitors tickers, orders, and products and publishes information through Redis cache and pub/sub. Must be running. Start with `node server.js start`|
 |trade.js|Execute trade with take profit and stoploss, monitor products for tradability, auto-trade with your own algo (requires coding). Run `node trade.js --help` for instructions.|
 |prices.js|Fetches price history and stores in postgres for analysis. Run `node price.js --help` for instructions.|
 
@@ -162,7 +182,7 @@ indicators, plus a much improved technical architecture for durability.
 
    # install nvm and then node.js
    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.38.0/install.sh | bash
-   nvm install
+   nvm install node
    ```
 1. Clone this repository and download dependencies (if you haven't already)
    ```
@@ -173,7 +193,8 @@ indicators, plus a much improved technical architecture for durability.
 1. Create a database and setup the schema in postgres
    ```
    psql -c "create database coinbasebot"
-   psql -d coinbasebot -f `./schema/pricehistory.psql`
+   psql -d coinbasebot -f ./schema/pricehistory.psql
+   psql -d coinbasebot -f ./schema/positions.psql
    ```
 1. Configure the system with api-keys, twilio and database settings
    ```
@@ -186,10 +207,10 @@ indicators, plus a much improved technical architecture for durability.
    ```
 1. Start the server to connect to Coinbase' websocket and cache info in Redis. The server must be running at all times.
    ```
-   screen ./server.js safe
+   screen ./server.js start
    # hit Ctrl-D A to disconnect from the screen and the app continues in the background.
    ```
-   ./server.js accepts two parameters, `start` which just runs the server, and `safe` which starts the server as a child process, and watches for any abnormal exits/crashes and restarts the server to keep it going. Most users should use `safe`, advanced users may have better ways of doing this.
+   Advanced users may want to install this as a daemon that auto-starts upon system restarts.
 1. Learn how to use ./trade.js
    ```
    ./trade.js --help
@@ -207,12 +228,12 @@ indicators, plus a much improved technical architecture for durability.
    ```
 1. Set up monitoring of all your products on the minute candlesticks
    ```
-   ./trade.js monitor --periods 100 --granularity 60 --disable-sms
+   ./trade.js monitor all --periods 100 --granularity 60 --disable-sms
    ```
    Again, use `screen ./trade.js <options>` to keep running over longer periods of time. Remove `--disable-sms` to enable notifications via Twilio to your phone. Note that Twilio fees can be significant if you are monitoring e.g. 60s or 1m candles and have settings that frequently signal tradability. There is a circuit break that stops Twilio messages if more than 50 messages is sent in an hour, this can catch coding errors that would otherwise lead to excessive charges. Can be adjusted by setting `MAX_MESSAGES_PER_INTERVAL` in `twilio.js`.
 1. Get some ticker data that you can analyse in your Excel or your favorite tool
    ```
-   ./trade.js prices ADA-EUR --periods 20 --granularity 86400 --ema1 12 --ema2 26 --movavgperiods 10
+   ./trade.js list-prices ADA-EUR --periods 20 --granularity 86400 --ema1 12 --ema2 26 --movavgperiods 10
    ```
    This will output the last 20 daily candles with calculated simple moving average over 10 periods for close, low, and high prices, as well as Exponential Moving Average on close for 12 and 26 periods (days). The output can be pasted into Excel for further analysis. Use `--raw` to get output in JSON format. This function is retrieving data live from Coinbase, so you are restricted to 300 periods until a future version where data will be pulled from the database.
 1. Sync price history to the database.
@@ -230,6 +251,12 @@ indicators, plus a much improved technical architecture for durability.
 _Hint:_ Use cron or at to schedule e.g. price sync or trading
 
 _Hint:_ Read the source code before using `auto` mode. Implement your algorithm, the provided one "catches falling knives" (read some trading books to learn what it means). Consider highly experimental at this time.
+
+
+
+## Upgrading from Alpha 1
+
+If you are currently running Alpha 1, you must update your database with the table required for tracking positions: `psql -d <databasename> -f ./schema/positions.psql`.
 
 
 
@@ -255,7 +282,7 @@ Can code, test, write docs? Small or big, all contributions are welcome. Simply 
 This project comes with _*zero warranties*_. Use at your own risk and with funds you can afford to lose, also due to technical errors like bugs, hickups, system faults, upgrades, iaas failures, lightning strikes, act of god. This system is designed for speed+performance, utilizes high resiliency architecture to cope with common problems, but will fail if your server falls over.
 
 
-The system is not 'in-a-box', and needs experienced administrators caring for the system to keep it live. If you don't know what this is, please don't use this project. I recommend skimming the source files; if you do not fully understand what it takes to maintain the system then please walk away now.
+The system is not 'in-a-box', and needs experienced administrators caring for the system to keep it live. If you don't know what this is, please don't use this project. I recommend skimming the source files; if you do not fully understand what it takes to maintain the system then please walk away now. (This may change as the project matures.)
 
 
 

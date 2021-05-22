@@ -26,61 +26,19 @@ SOFTWARE.
 
 --
 
-Module:         Misc tool functions used by other modules
+Module:         Exception class to signal user input errors
 
-Usage:          See individually exported functions
+Description:    Intent is that messages are displayed directly to the user
+                while other types of errors display the full exception details 
+                and stack trace
 
 */
 
 
 
-module.exports.sleep = function sleep(ms) 
+module.exports = class UserError extends Error
 {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-
-
-module.exports.keypress = async function()
-{
-  process.stdin.resume();
-  
-  return new Promise(resolve => process.stdin.once('data', () => 
-  {
-    process.stdin.pause();
-    resolve();
-  }
-  ));
-}
-
-
-
-module.exports.countDecimals = function(number)
-{
-  const strnum = number.toString();
-  const lastPeriod = strnum.lastIndexOf('.');
-  return lastPeriod == -1 ? 0 : strnum.length - lastPeriod - 1;
-}
-
-
-
-module.exports.getCurrencySymbolFromProduct = function(str)
-{
-  return str.indexOf( "-EUR" ) > 0 ? '€' : '$';
-}
-
-
-
-module.exports.zeroPad = function(num, places) 
-{
-  return String(num).padStart(places, '0');
-}
-
-
-
-module.exports.now = function()
-{
-  return new Date();
+    constructor( message ) {
+        super( message )
+    }
 }

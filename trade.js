@@ -2,41 +2,69 @@
 
 /*
 
-*** TRADE (BOT) ***
+COINBASE-BOT
 
-Automated limit, stoploss and target trade system
-Executes a single trade, either at limit or market price
+MIT License
 
-./trade --help for instructions
+Copyright (c) 2021 dfient@protonmail.ch; https://github.com/dfient/coinbase-bot
 
-EXAMPLES
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-./trade limit -l 10000 -b 10 -s 10.0 -t 2.5
-> Places limit order at EUR 10.000 with budget of 10 EUR (calculates order size), stoploss at 10% and target at 2.5%
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-./trade market -b 10 -s 10.0 -t 2.5
-> Places buy order immediately at market price, stoploss at 10% and target at 2.5%
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
-Hint: You can cancel the stoploss order using Coinbase app or web and bot will continue running until target reached
-without loss protection. If you also kill the bot, you essentially have a HODL.
+--
 
-Hint: Use screen to make sure this continues to run if you loose your terminal connection,
-alternatively schedule jobs using at or chron
+Module:         Main module for coinbase-bot.
+
+Description:    This module is an entrypoint module meant to be called by users
+                of the application.
+
+Dependencies:	Redis, Postgres and 'server.js' must be running.
+                Future: prices.js must have synced price history.
+
+Usage:          Run './trade.js --help' for usage information.
+
+Notes:			This module could take some refactoring for readability and
+                maintainability. Focus atm is on system completeness for a
+				Proof of Concept version to be released.
 
 */
+
+
 
 const logtool = require('./logger');
 var logger = require('./logger').log;
 
+const APIKeys = require('./apikeys');
 var tools = require('./tools');
 var coinbase = require('./coinbase');
-var clc = require('cli-color');
+var rediswrapper = require('./rediswrapper');
+const positions = require('./positions');
+const UserError = require('./usererror.js');
+
 const yargs = require('yargs');
+const clc = require('cli-color');
 const twilio = require('./twilio');
-const APIKeys = require('./apikeys');
-const { abort } = require('process');
 const math = require('mathjs');
-fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
+
+const { abort } = require('process');
+const { exit } = require('process');
+//fs = require('fs');
 
 var g_commandLineHandled = false; // set to true when command line handled, so not to output --help hint message
 
@@ -114,8 +142,8 @@ async function tradebot(priceLimit, size, stopLossPrice, sellAtPrice, product, p
 			var limitOrderStatus = await coinbase.checkIfOrderDone( buyOrderId );
 			if ( limitOrderStatus.done && limitOrderStatus.status == "canceled" )
 			{
-				// order has been cancelled in the ui, abort our process
-				console.log("Order has been cancelled by other user/process, stopping.");
+				// order has been canceled in the ui, abort our process
+				console.log("Order has been canceled by other user/process, stopping.");
 				return 0;
 			}
 			else if ( limitOrderStatus.done && limitOrderStatus.status == "filled" )
@@ -136,7 +164,7 @@ async function tradebot(priceLimit, size, stopLossPrice, sellAtPrice, product, p
 			process.stdout.write(clc.erase.line);
 			process.stdout.write(clc.move.lineBegin);
 			process.stdout.write('Market price: ' + marketprice.toFixed( productInfo.x_quote_precision ) + ' ');
-			process.stdout.write(marketprice > priceLimit ? ' (Distance: ' + clc.green(percentDiff.toFixed( 5 ) + '%') + clc.blue(' €' + distance.toFixed( productInfo.x_quote_precision )) + ') ' : '');
+			process.stdout.write(marketprice > priceLimit ? ' (Distance: ' + clc.green(percentDiff.toFixed( 5 ) + '%') + clc.blue(' ' + tools.getCurrencySymbolFromProduct(product) + distance.toFixed( productInfo.x_quote_precision )) + ') ' : '');
 			process.stdout.write('[Hi: ' + hiWatermark.toFixed( productInfo.x_quote_precision ) + ' Lo: ' + loWatermark.toFixed( productInfo.x_quote_precision ) + ']');
 			// IMPROVEMENT: Pick right currency symbol above based on product
 			
@@ -299,6 +327,551 @@ async function marketTrade(argv)
 	await _commonTradeProc(argv, marketPrice);
 }
 
+async function buy(argv)
+{
+	var orderId = null;
+	var product = await coinbase.getProductInfo( argv.product );
+	const base_precision = tools.countDecimals( product.base_increment );
+
+	if ( argv.mode == 'market' )
+	{
+		if ( argv.budget < product.min_market_funds )
+		{
+			console.log("Budget is too small.")
+			exit( 1 );
+		}
+
+		console.log("Buying", argv.product, "for the amount of", argv.budget);
+		orderId = await coinbase.buyMarketPrice( argv.budget, argv.product );
+	}
+	else if ( argv.mode == 'limit' )
+	{
+		var size = argv.budget / argv.limit;
+
+		if ( size < product.base_min_size )
+		{
+			console.log("Budget is too small.")
+			exit( 1 );
+		}
+
+		console.log("Buying", size.toFixed( base_precision ), "of", argv.product, "at", argv.limit);
+		orderId = await coinbase.buyLimitPrice( argv.limit, size.toFixed( base_precision ), argv.product );
+	}
+
+	var order = await coinbase.getPrivateClient().getOrder( orderId );
+
+	if ( argv.raw )
+	{
+		console.log( order );
+	}
+	else
+	{
+		if ( order.settled )
+		{
+			if ( order.type == 'market' )
+			{
+				console.log("Order settled,", order.filled_size, order.product_id, "at", order.executed_value / order.filled_size);
+			}
+			else if ( order.type == 'limit' )
+			{
+				console.log("Order settled,", order.filled_size, order.product_id, "at", order.executed_value / order.filled_size, "vs limit", argv.limit );
+			}
+		}
+		else
+		{
+			console.log("Order pending, use './" + argv.$0, "get-order", order.id + "' for status.");
+		}
+	}
+}
+
+async function sell(argv)
+{
+	var order_res = null;
+	var product = await coinbase.getProductInfo( argv.product );
+
+	if ( argv.size < product.base_min_size || argv.size < product.base_increment )
+	{
+		console.log("Size is too small.")
+		exit( 1 );
+	}
+
+	if ( argv.mode == 'market' )
+	{
+		console.log("Selling", argv.size, "of", argv.product, "at market price.");
+		order_res = await coinbase.sellAtMarketPriceEx( argv.size, product, null );
+	}
+	else if ( argv.mode == 'limit' )
+	{
+		var ticker = await coinbase.getTicker( argv.product, true, false );
+		if ( argv.limit < ticker.bid && argv.force != true )
+		{
+			console.log("Limit price is below current market price.");
+			exit( 1 );
+		}
+
+		console.log("Selling", argv.size, "of", argv.product, "at", argv.limit + tools.getCurrencySymbolFromProduct(argv.product));
+		order_res = await coinbase.sellAtLimitPriceEx(argv.size, argv.limit, product, null );
+	}
+
+	console.log("Order pending, use './" + argv.$0, "get-order", order_res.order_data.id + "' for status.");
+}
+
+async function cancelOrder( argv )
+{
+	try
+	{
+		var order = await coinbase.getPrivateClient().getOrder( argv.orderid );
+
+		if ( order.status != 'open' )
+		{
+			console.log("The order is in '" + order.status + "' status, and cannot be canceled.");
+			exit( 2 );
+		}
+
+		var res = await coinbase.cancelOrder( argv.orderid );
+		console.log(res);
+	}
+	catch( e )
+	{
+		if ( e.response.statusCode == 404 )
+		{
+			console.log("The order can not be found. (It may have been canceled previously.)");
+			exit( 1 );
+		}
+	}
+}
+
+async function open( argv )
+{
+	// IMPORTANT: The order may not settle for a long time - who is responsible for updating the position? 
+	// Well, server.js of course. How does it know the order maps to a position? We have to tell i
+	// it using the client id. Existing code in F0/smabot is way ahead of us in server.js and creates
+	// clientid:<guid> mappings in redis. We therefore use a new namespace with hashes to store more
+	// information, cid:<guid> where position:<name> is created here, and mapped to order by server.js
+	// later. This must be updated in server.js when we merge F0/smabot with F0/BuySell
+
+	// Also note: The exchange may be faster than us. We therefore create the position in the db first
+	// then execute the order. Status 'new' will be changed to 'open' by the server when the order
+	// is filled. (Status 'new' + 'buy_order_id!=null' indicates the order reached the exchange.)
+
+	try
+	{
+		const productInfo = await coinbase.getProductInfo( argv.product );
+
+		// Create map between position in postgres and the client id used to submit the buy order
+
+		const clientId = uuidv4();
+		const positionName = argv.name != null ? argv.name : require('shortid').generate().toLowerCase().replaceAll('-','').replaceAll('_','');
+		const redis = rediswrapper.getRedisClientSingleton()
+		await redis.hmsetAsync("cid:"+clientId, "position", positionName);
+
+		// Create the position in psql
+
+		var positionId = null;
+		var order_result = null;
+		
+		// Place the buy order
+		
+		if ( argv.mode == 'market' )
+		{
+			positionId = await positions.create( positionName, argv.product, null, argv.budget );
+
+			console.log("Buying", productInfo.id, "for the amount of", argv.budget);
+			order_result = await coinbase.buyMarketPriceEx( argv.budget, productInfo, clientId );
+		}
+		else if ( argv.mode == 'limit' )
+		{
+			const size = argv.budget / argv.limit;
+			
+			positionId = await positions.create( positionName, argv.product, size, argv.limit );
+			
+			console.log("Buying", size.toFixed( productInfo.x_base_precision ), "of", productInfo.id, "at", argv.limit);
+			order_result = await coinbase.buyLimitPriceEx( argv.limit, size, productInfo, clientId );
+		}
+
+		// Update the record with the buy order id
+
+		await positions.updateWithBuyOrderId( positionName, order_result.order_data.id );
+
+
+		// Set stop-loss, take-profit and close-at-time settings for the position
+
+		argv.name = positionName;
+		await adjustPosition( argv );
+
+
+		// Return the state of things
+
+		console.log( "Position pending, use './" + argv.$0, "get-position", positionName + "' for updates.");
+	}
+	finally
+	{
+		await rediswrapper.closeRedisSingleton();
+	}
+}
+
+async function adjustPosition( argv )
+{
+	if ( argv.stopLoss == null && argv.takeProfit == null && argv.closeAt == null )
+		return;
+
+	const positionName = argv.name;
+	const position = await positions.get( positionName );
+	const productInfo = await coinbase.getProductInfo( position.product );
+
+	if ( ! (position.status == 'open' || position.status == 'new') )
+		throw new UserError( "Can not adjust a position that is not open." );
+
+	if ( position.sell_order_id )
+		throw new UserError( "Can not adjust a position that has an open sell order." );
+
+	var basePrice = position.price ? Number(position.price) : Number(argv.limit);
+	if ( basePrice == null )
+	{
+		var ticker = await coinbase.getTicker( productInfo.id )
+		basePrice = Number(ticker.price);
+	}
+	
+	var stopLoss = null;
+	if ( argv.stopLoss != null )
+	{
+		if ( argv.stopLoss == true )
+		{
+			stopLoss = true;
+		}
+		else if ( String(argv.stopLoss).slice(-1) == '%' )
+		{
+			var stopLossPercentage = Number( String(argv.stopLoss).slice(0,-1) );
+			stopLoss = basePrice - (basePrice * stopLossPercentage / 100);
+		}
+		else
+		{
+			stopLoss = Number( argv.stopLoss );
+		}
+	}
+
+	var takeProfit = null;
+	if ( argv.takeProfit != null )
+	{
+		if ( argv.takeProfit == true )
+		{
+			takeProfit = true;
+		}
+		else if ( String(argv.takeProfit).slice(-1) == '%' )
+		{
+			var takeProfitPercentage = Number( String(argv.takeProfit).slice(0,-1) );
+			takeProfit = basePrice + (basePrice * takeProfitPercentage / 100);
+		}
+		else
+		{
+			takeProfit = Number( argv.takeProfit );
+		}
+	}
+
+	var closeAt = null;
+	if ( argv.closeAt != null )
+	{
+		if ( argv.closeAt == true )
+		{
+			closeAt = true;
+		}
+		else
+		{
+			closeAt = new Date( argv.closeAt );
+			
+			if ( closeAt.getTime() < tools.now().getTime() )
+				throw new UserError( "--close-at cannot be in the past." );
+		}
+	}
+
+	await positions.adjustSellTriggers( positionName, takeProfit, stopLoss, closeAt );
+	return { name: positionName, take_profit: takeProfit, stop_loss: stopLoss, close_at_time: closeAt };
+}
+
+async function close(argv)
+{
+	var res = await _close_position( argv.name, argv.mode, argv.limit );
+	console.log( "Position pending, use './" + argv.$0, "get-position", argv.name + "' for updates.");
+}
+
+async function _close_position( name, mode, limit = null )
+{
+	// NOTE: A position may be in multiple states when requested to be closed
+	// It can be: 'new' + buy_order_id == null, indicating our open method crashed (shouldn't happen but ie connection errors could do this atm)
+	// It can be: 'new' + buy_order_id != null, indicating it is pending at the exchange
+	// It can be: 'open', executed at exchange and coins in our account
+	// It can be: 'closed' + sell_order_id == null, indicating our close method crashed (shouldn't happen but ie connection errors could do this atm)
+	// It can be: 'closed' + sell_order_id != null, indicating it is pending at the exchange
+	// It can be: 'closed' + WHAT? How do we know it is fully done? server.js has a job here.
+	// CONSIDER: Changing closed to closing in trade.js, let server.js set status to closed when done.
+	// IMPROVEMENT: We'll need a way to fix broken closing, ie setting a too high limit. We should let close command reset the
+	// method of closing, so changing the limit value (cancelling+resetting order) og cancelling + going to market
+	// FUTURE: It is also interesting to think of TP and SL settings on the position, and let server.js monitor tickers and order
+	// book to execute these, this will let users update TP and SL as they see the 
+	// market evolving (new commands set-take-profit, set-stop-loss for positions)
+
+	var position = await positions.get( name );
+	var res = null;
+	
+	if ( position.status == 'open' && position.sell_order_id == null )
+	{
+		console.log("Position is open, placing sell order.");
+		
+		res = await _sell_position( position, mode, limit );
+	}
+	else if ( position.status == 'open' && position.sell_order_id != null )
+	{
+		console.log("Canceling existing sell order.");
+
+		await coinbase.cancelOrder( position.sell_order_id );
+		await positions.removeSellOrder( name );
+
+		console.log("Placing new sell order.");
+		res = await _sell_position( position, mode, limit );
+	}
+	else if ( position.status == 'new' )
+	{
+		throw new UserError( "Position is not open. Use 'trade.js cancel <name>." );
+	}
+	else if ( position.status == 'closed' )
+	{
+		throw new UserError( `Position is already closed (at ${position.close_time.toLocaleString()}).` );
+	}
+	else if ( position.status == 'canceled' || position.status == 'aborted' )
+	{
+		throw new UserError( `Position is already canceled (at ${position.close_time.toLocaleString()}).` );
+	}
+	else
+	{
+		throw new Error("Cannot close the position as it is in an unknown state.");
+	}
+
+	return res;
+}
+
+async function _sell_position( position, mode, limit )
+{
+	// TODO
+	// Match client_oid to position through redis
+	// Place sell order at exchange
+	// Update database with sell order_id
+
+	const clientId = uuidv4();
+	await redis.hmsetAsync("cid:"+clientId, "position", position.name);
+
+	const productInfo = await coinbase.getProductInfo( position.product );
+
+	var order_result = null;
+	if ( mode == 'market' )
+	{
+		console.log("Selling", position.size, "of", productInfo.id, "at market price.");
+		order_result = await coinbase.sellAtMarketPriceEx( position.size, productInfo, clientId );
+	}
+	else if ( mode == 'limit' )
+	{
+		console.log("Selling", position.size, "of", productInfo.id, "at", limit.toFixed( productInfo.x_quote_precision ) );
+		order_result = await coinbase.sellAtLimitPriceEx( position.size, limit, productInfo, clientId );
+	}
+
+	await positions.updateWithSellOrder( position.name, order_result.order_data.id );
+	return order_result;
+}
+
+async function cancel(argv)
+{
+	await _cancel_position( argv.name );
+}
+
+async function _cancel_position( name )
+{
+	// NOTE: A position is cancelable if it is in 'new' or 'new (buying)' mode, in which case the entire position is canceled
+	// and no transactions were fulfilled.
+	// It can also be 'open (selling)', in which case the position will return to open (hold). This can be used to revert
+	// a close limit order that is too far from the market, e.g. to replace with new limit or market order.
+
+	var position = await positions.get( name );
+
+	if ( position.status == 'new' && position.buy_order_id == null )
+	{
+		await positions.updateOnClosePositionWithoutBuyOrder( name );
+		console.log("Closed orphaned position. No transactions were performed.");
+	}
+	else if ( position.status == 'new' && position.buy_order_id != null )
+	{
+		await coinbase.cancelOrder( position.buy_order_id );
+		await positions.updateOnCancelPositionWithBuyOrder( name );
+
+		console.log("Canceled buy order. No transactions were performed.");
+	}
+	else if ( position.status == 'open' && position.sell_order_id != null )
+	{
+		await coinbase.cancelOrder( position.sell_order_id );
+		await positions.removeSellOrder( name );
+
+		console.log( "Canceled sell order, position is back in 'open' state. Use 'trade.js close <name>' to place new sell order.");
+	}
+	else
+	{
+		console.log( "Position is not in a state that can be canceled." );
+	}
+}
+
+async function panic( argv )
+{	
+	// TODO: IMPLEMENT
+
+	// NOTE: Panic must not only close open positions, but also look for 'open (selling)',
+	// in which case it must cancel the current sell order, and replace it with a market sell
+	//
+	// Panic should also close all open (buying) orders, effectively taking us entirely
+	// out of market action
+	//
+	// first cancel buy orders
+	// then close open positions
+	// then cancel sell orders and replace with market
+	//
+	// Note: if we have many open positions, we may reach api request limits on this operation
+	// we must therefore make sure we pause as necessary to stay below 15 requests per second
+
+	if ( argv.force == null || argv.force == false)
+	{
+		var newNames = [];
+		var newPositions = await positions.list( 'new', null );
+		newPositions.forEach( (p) => newNames.push(p.name) );
+		
+		var openNames = [];
+		var openPositions = await positions.list( 'open', null );
+		openPositions.forEach( (p) => openNames.push(p.name) );
+
+		console.log( "Pending buys:", newNames.length > 0 ? newNames : "<none>" );
+		console.log( "Open positions:", openNames.length ? openNames : "<none>" );
+
+		console.log( "No action taken. Rerun command with --force to execute." );
+		exit( 1 );
+	}
+
+	// Cancel any pending buy orders
+
+	var newPositions = await positions.list( 'new', null );
+	for ( position of newPositions )
+	{
+		try
+		{
+			console.log("Canceling", position.name, "pending buy of", position.product, "for", position.price, tools.getCurrencySymbolFromProduct(position.product) );
+			await _cancel_position( position.name );
+		}
+		catch( error )
+		{
+			console.log( "Can not cancel pending buy order for", position.name, "(See log file for details.)" );
+			logger.error( error, "Unable to cancel buy order" );
+		}
+	}
+
+	// Next, sell off all open positions
+
+	var openPositions = await positions.list( 'open', null );
+
+	for ( position of openPositions )
+	{
+		try 
+		{
+			if ( position.sell_order_id )
+			{
+				console.log( "Canceling pending sell order for", position.name );
+				await _cancel_position( position.name );
+			}
+
+			console.log( "Closing position", position.name, "at market value." );
+			await _close_position( position.name, 'market' );
+		}
+		catch( error )
+		{
+			console.log("Can not close position", position.name, "(See log file for details.)");
+			logger.error( error, "Unable to close position" );
+		}
+	}
+}
+
+async function getPosition( argv )
+{
+	var res = await positions.get( argv.name );
+	console.log( res );
+}
+
+async function listPositions( argv )
+{
+	var res = await positions.list( argv.filter );
+	
+	for ( position of res )
+	{
+		if ( position.status == 'new')
+		{
+			if ( position.buy_order_id != null )
+				position.status = 'new (buying)';
+		}
+		else if ( position.status == 'open' )
+		{
+			var product = await coinbase.getProductInfo( position.product );
+			var currentBid = await coinbase.getMarketBidPrice( position.product );
+
+			var result = (position.size * currentBid) - (position.size * position.buy_fill_price);
+			result -= position.buy_fees * 2; // simple, not precise, estimate, sell fee is same as buy fee
+
+			// IMPROVEMENT: Need to know exchange fee structure to correctly estimate result,
+			// we should include the estimated sell fee in our result calculation
+
+			position.result = Number( result ).toFixed( tools.countDecimals( product.quote_increment ) ) + '~';
+
+			if ( position.sell_order_id != null )
+				position.status = 'open (selling)';
+		}
+		else if ( position.status == 'closed' )
+		{
+			// Nothing to do here
+		}
+
+		position.triggers = "";
+		position.take_profit ? position.triggers += "#TP" : null;
+		position.stop_loss ? position.triggers += "#SL" : null;
+		position.close_at_time ? position.triggers += "#TIME" : null;
+	}
+
+	if ( argv.raw )
+	{
+		// IMPROVEMENT: We should also support output in CSV format for Excel import
+		console.log( res );
+	}
+	else if ( argv.csv )
+	{
+		console.log("#", argv.filter, "positions as of", new Date().toLocaleString());
+		console.log("id,name,status,product,size,price,result,triggers")
+		
+		for ( position of res )
+			console.log(
+				position.id
+				+ "," + position.name
+				+ "," + position.status
+				+ "," + position.product
+				+ "," + position.size
+				+ "," + position.price
+				+ "," + position.result
+				+ "," + position.triggers
+			);
+	}
+	else
+	{
+		var cols = [];
+		cols.push( ['id', 'name','status','product','size','price','result','triggers'] );
+
+		for ( position of res )
+			cols.push( [ position.id, position.name, position.status, position.product, position.size, position.price, position.result, position.triggers ] );
+
+		process.stdout.write(
+			clc.columns( cols )
+		);
+	}
+}
+
 async function autoTrade( argv )
 {
 	logger.info(argv, "Starting autotrade");
@@ -455,10 +1028,27 @@ async function monitor( argv )
 		{
 			var msg = product.product + " is tradeable at " + ticker.ask.toFixed(2);
 
-			var target = ticker.ask + (ticker.ask * argv.target / 100);
-			var stoploss = ticker.ask - (ticker.ask * argv.stoploss / 100);
+			if ( argv.target || argv.stoploss )
+			{
+				msg += " (";
 
-			msg += " (Target " + target.toFixed(2) + ", Stoploss " + stoploss.toFixed(2) + ")";
+				if ( argv.target )
+				{
+					var target = ticker.ask + (ticker.ask * argv.target / 100);
+					msg += "Target " + target.toFixed(2);
+				}
+
+				if ( argv.stoploss )
+				{
+					var stoploss = ticker.ask - (ticker.ask * argv.stoploss / 100);
+					if ( argv.target )
+						msg += ", ";
+					
+					msg += "Stoploss " + stoploss.toFixed(2);
+				}
+
+				msg += ")";
+			}
 
 			if ( !argv.disableSms )
 				await twilio.sendTextMessageAsync( msg );
@@ -753,7 +1343,7 @@ async function analyze(argv)
 		else
 		{
 			console.log( clc.yellow( "Product", analysis.product, "analysed at", analysis.time.toLocaleString() ) );
-			console.log( "Timespan", analysis.timeSpanDays, "days (" + analysis.timeStart.toLocaleString() + ' - ' + analysis.timeEnd.toLocaleString() + ')' );
+			console.log( "Timespan", analysis.timeStart.toLocaleString() + ' - ' + analysis.timeEnd.toLocaleString() );
 			console.log( "Granularity", analysis.granularity, "Minimum volatility", analysis.min_volatility);
 			console.log( "Low avg", result.low_avg.toFixed(2), "Hi avg", result.high_avg.toFixed(2), "Hi/Lo Diff", result.high_low_diff.toFixed(4) + "%" );
 			console.log( "Open avg", result.open_avg.toFixed(2), "Close avg", result.close_avg.toFixed(2), "O/C Diff", result.open_close_diff.toFixed(4) + "%" );
@@ -763,10 +1353,7 @@ async function analyze(argv)
 
 			if ( result.decision.trade_now )
 			{
-				var takeprofit = Number(analysis.market_price + (analysis.market_price * analysis.min_volatility / 100)).toFixed(2);
-				var stoploss = Number(analysis.market_price - (analysis.market_price * argv.stoploss / 100)).toFixed(2);
-
-				console.log( clc.green('🟩 Trade now'), "T/P:", takeprofit, "S/L:", stoploss );
+				console.log( clc.green('🟩 Trade now') );
 			}
 			else
 			{
@@ -803,7 +1390,7 @@ async function _analyzeProduct(analysis)
 {
 	// Get prices and ticks and transform into easier format for us coders
 
-	analysis.market_price = (await coinbase.getTicker( analysis.product, false, true )).ask;
+	analysis.market_price = (await coinbase.getTicker( analysis.product, false, false )).ask;
 
 	var res = await coinbase.getPublicClient().getProductHistoricRates(analysis.product, { start: analysis.timeStart, end: analysis.timeEnd, granularity: analysis.granularity });
 	res.sort( (lhs, rhs) => { return lhs[0] < rhs[0] ? -1 : 1; } )
@@ -1028,21 +1615,30 @@ function getAnalysisArguments(argv)
 
 	var currentTime = new Date();
 	var timeEnd = new Date(currentTime.getTime() - currentTime.getTime() % ( argv.granularity * 1000 ) - ( argv.granularity * 1000 ) );
-	var timeStart = new Date( timeEnd.getTime() - (1000 * 60 * 60 * 24 * argv.days) );
-	var maxTime = new Date( timeEnd.getTime() - (argv.granularity * 1000 * 300) );
+	var timeStart = new Date( timeEnd.getTime() - (1000 * argv.granularity * (argv.periods-1)) );
 
-	if ( timeStart < maxTime )
+	if ( argv.periods > 300 )
 	{
-		timeStart = maxTime;
+		// IMPROVEMENT: Until we fetch candles from postgres, we're limited by the api (then we'll be limited by whatever
+		// the admin chose to sync - which could be since coin listing years ago)
 
-		console.log("Price analysis period is too long, capping start time to", timeStart.toLocaleString());
-		logger.warn("Analysis period exceeds 300 ticks, capping to" + timeStart.toISOString());
+		throw new UserError("--periods is restricted to <=300.");
 	}
+
+	// var maxTime = new Date( timeEnd.getTime() - (argv.granularity * 1000 * 300) );
+
+	// if ( timeStart < maxTime )
+	// {
+	// 	timeStart = maxTime;
+
+	// 	console.log("Price analysis period is too long, capping start time to", timeStart.toLocaleString());
+	// 	logger.warn("Analysis period exceeds 300 ticks, capping to" + timeStart.toISOString());
+	// }
 
 	var analysis = {
 		time : new Date(),
 		product : argv.product,
-		timeSpanDays : argv.days,
+		//timeSpanDays : argv.days, // deprecated, we're using periods not days for analyze, monitor, auto, prices (days don't make sense with granularity other than 86400)
 		timeStart : timeStart,
 		timeEnd : timeEnd,
 		granularity : argv.granularity,
@@ -1112,8 +1708,15 @@ async function getTicker(argv)
 
 function parseCommandLine()
 {
+	// IMPROVEMENT: Group limit and market into "single" to make interface more similar to buy + open
+	// ALSO using list- and get- to indicate operations that do not modify the state (or place orders)
+	// ADD: list-orders and list-products just to make the system 'more complete'
+	// We need to clean up the order in this list, here's suggestions:
+	// 1. Buy/Sell 2. Limit/Market Trade 3. Positions 4. Auto+Monitor 5. Price + Info
+	// TODO: We also need a way to differentiate an auto-traded positon from manually traded
+	// so that users don't inadvertently close positions tracked by the auto-trader
 	const argv = yargs
-	.command('limit <product>', 'Run a single limit buy trade, take profit and stop loss (one cancels other)', (yargs) => {
+	.command('limit <product>', 'Run a single limit buy and OCO TP+SL trade', (yargs) => {
 		yargs.positional('product', {
 			description: 'The product to trade, e.g. BTC-EUR',
 			type: 'string'
@@ -1142,8 +1745,9 @@ function parseCommandLine()
 			type: 'number',
 			demandOption : true
 		})
+		
 	})
-	.command('market <product>', 'Run a single trade at market price, take profit and stop loss (one cancels other)', (yargs) => {
+	.command('market <product>', 'Run a single market buy and OCO TP+SL trade', (yargs) => {
 		yargs.positional('product', {
 			description: 'The product to trade, e.g. BTC-EUR',
 			type: 'string'
@@ -1184,7 +1788,7 @@ function parseCommandLine()
 			default: false
 		})
 		.option('target', {
-			description: 'percentage to set target price at',
+			description: 'percentage to take profit at',
 			alias: 't',
 			type: 'number',
 			demandOption : true
@@ -1195,79 +1799,9 @@ function parseCommandLine()
 			type: 'number',
 			demandOption : true
 		})
-		.option('days', {
+		.option('periods', {
 			description: 'Number of days to analyze price history for',
-			alias: ['d','periods'],
-			type: 'number',
-			default: 10
-		})
-		.option('granularity', {                        // 1m 5m  15m 1h   6h    24h
-			description: 'Time interval to get in seconds [60|300|900|3600|21600|86400]',
-			alias: 'g',
-			type: 'number',
-			default: 86400
-		})
-		.option('movavgperiods', {
-			description: 'Number of periods in moving averages',
-			type: 'number',
-			default: 10,
-			alias: 'p'
-		})
-		.option('ema1periods', {
-			description: 'Number of periods in exponential moving average 1',
-			type: 'number',
-			default: 12,
-			alias: 'ema1'
-		})
-		.option('ema2periods', {
-			description: 'Number of periods in exponential moving average 2',
-			type: 'number',
-			default: 26,
-			alias: 'ema2'
-		})
-		.option('volatility', {
-			description: 'Minimum volatility for trading, e.g. 2.0 (%)',
-			type: 'number',
-			default: 2.5
-		})
-		.option('ignore-trend', {
-			description: 'Ignore ema1 vs ema2 trend indicator',
-			type: 'boolean',
-			default: false
-		})
-	})
-	.command('monitor', 'Monitor multiple currencies, text message when tradeable', (yargs) => {
-		yargs
-		// .positional('product', {
-		// 	description: 'The product to trade, e.g. BTC-EUR',
-		// 	type: 'string'
-		// })
-		// .option('budget', {
-		// 	description: 'the amount of money to buy for',
-		// 	alias: 'b',
-		// 	type: 'number',
-		// 	demandOption : true
-		// })
-		// .option('reinvestprofits', {
-		// 	description: 'adjust budgets to reinvest accumulated profit',
-		// 	type: 'boolean',
-		// 	default: false
-		// })
-		.option('target', {
-			description: 'percentage to set target price at',
-			alias: 't',
-			type: 'number',
-			demandOption : true
-		})
-		.option('stoploss', {
-			description: 'percentage to set stoploss at',
-			alias : 's',
-			type: 'number',
-			demandOption : true
-		})
-		.option('days', {
-			description: 'Number of days to analyze price history for',
-			alias: ['d','periods'],
+			alias: ['d','days','p'],
 			type: 'number',
 			default: 10
 		})
@@ -1296,14 +1830,95 @@ function parseCommandLine()
 			alias: 'ema2'
 		})
 		.option('volatility', {
-			description: 'Minimum volatility for trading, e.g. 2.5 (%)',
+			description: 'Minimum volatility for trading, e.g. 2.0 (%)',
 			type: 'number',
-			default: 2.5
+			default: 2.5,
+			alias: 'v'
 		})
 		.option('ignore-trend', {
 			description: 'Ignore ema1 vs ema2 trend indicator',
 			type: 'boolean',
 			default: false
+		})
+	})
+	.command('monitor', 'Monitor multiple products for tradability', (yargs) => {
+		yargs
+		// .positional('product', {
+		// 	description: 'The product to trade, e.g. BTC-EUR',
+		// 	type: 'string'
+		// })
+		// .option('budget', {
+		// 	description: 'the amount of money to buy for',
+		// 	alias: 'b',
+		// 	type: 'number',
+		// 	demandOption : true
+		// })
+		// .option('reinvestprofits', {
+		// 	description: 'adjust budgets to reinvest accumulated profit',
+		// 	type: 'boolean',
+		// 	default: false
+		// })
+		.option('periods', {
+			description: 'Number of days to analyze price history for',
+			alias: ['p'],
+			type: 'number',
+			default: 10,
+			group: 'Candle and period:'
+		})
+		.option('granularity', {                        // 1m 5m  15m 1h   6h    24h
+			description: 'Time interval to get in seconds [60|300|900|3600|21600|86400]',
+			alias: 'g',
+			type: 'number',
+			default: 86400,
+			group: 'Candle and period:'
+		})
+		.option('movavgperiods', {
+			description: 'Number of periods in moving averages',
+			type: 'number',
+			default: 10,
+			alias: 'sma',
+			group: 'Trend and Signals:'
+		})
+		.option('ema1periods', {
+			description: 'Number of periods in exponential moving average 1',
+			type: 'number',
+			default: 12,
+			alias: 'ema1',
+			group: 'Trend and Signals:'
+		})
+		.option('ema2periods', {
+			description: 'Number of periods in exponential moving average 2',
+			type: 'number',
+			default: 26,
+			alias: 'ema2',
+			group: 'Trend and Signals:'
+		})
+		.option('volatility', {
+			description: 'Minimum volatility for trading, e.g. 2.0 (%)',
+			type: 'number',
+			default: 2.5,
+			alias: 'v',
+			group: 'Trend and Signals:'
+		})
+		.option('ignore-trend', {
+			description: 'Ignore ema1 vs ema2 trend indicator',
+			type: 'boolean',
+			default: false,
+			group: 'Trend and Signals:'
+		})
+		.option('target', {
+			description: 'percentage to set target price at',
+			alias: 't',
+			type: 'number',
+			demandOption : false,
+			group: 'Trade details:'
+		})
+		.option('stoploss', {
+			description: 'percentage to set stoploss at',
+			alias : 's',
+			type: 'number',
+			demandOption : false,
+			group: 'Trade details:'
 		})
 		.option('disable-sms', {
 			description: 'Do not send notifications via sms',
@@ -1311,7 +1926,197 @@ function parseCommandLine()
 			default: false
 		})
 	})
-	.command('ticker <product>', 'Display ticker information', (yargs) => {
+	.command('buy <mode> <product>', 'Buy a product in market or limit mode', (yargs) => {
+		yargs.positional('mode', {
+			description: `Trading mode`,
+			choices: [ 'market', 'limit' ]
+		})
+		yargs.positional('product', {
+			description: 'The product to trade, e.g. BTC-EUR',
+			type: 'string'
+		})
+		.option('budget', {
+			description: 'the amount of money to buy for',
+			alias: 'b',
+			type: 'number',
+			demandOption: true,
+			group: 'Trade details:'
+		})
+		.option('limit', {
+			description: 'Maximum price of product for limit orders',
+			alias: 'l',
+			type: 'number',
+			group: 'Trade details:'
+		})
+	})
+	.command('sell <mode> <product>', 'Sell a product in market or limit mode', (yargs) => {
+		yargs.positional('mode', {
+			description: `Trading mode`,
+			choices: [ 'market', 'limit' ]
+		})
+		yargs.positional('product', {
+			description: 'The product to trade, e.g. BTC-EUR',
+			type: 'string'
+		})
+		.option('size', {
+			description: 'the amount of coins to sell',
+			alias: 's',
+			type: 'number',
+			demandOption: true,
+			group: 'Trade details:'
+		})
+		.option('limit', {
+			description: 'Minimum price of product',
+			alias: 'l',
+			type: 'number',
+			group: 'Trade details:'
+		})
+		.option('force', {
+			description: 'Force sell even if limit price is < market price',
+			type: 'boolean',
+			group: 'Trade details:'
+		})
+	})
+	.command('cancel-order <orderid>', 'Cancel a pending order', (yargs) => {
+		yargs.positional('orderid', {
+			description: `The order to cancel`,
+			type: 'string'
+		})
+	})
+	.command('open <mode> <product>', 'Buy and track the position', (yargs) => {
+		yargs.positional('mode', {
+			description: `Trading mode`,
+			choices: [ 'market', 'limit' ]
+		})
+		yargs.positional('product', {
+			description: 'The product to trade, e.g. BTC-EUR',
+			type: 'string'
+		})
+		.option('name', {
+			description: 'Name of the position',
+			alias: 'n',
+			type: 'string',
+			demandOption: false,
+			group: 'Trade details:'
+		})
+		.option('budget', {
+			description: 'the amount of money to buy for',
+			alias: 'b',
+			type: 'number',
+			demandOption: true,
+			group: 'Trade details:'
+		})
+		.option('limit', {
+			description: 'Maximum price of product for limit orders',
+			alias: 'l',
+			type: 'number',
+			group: 'Trade details:'
+		})
+		.option('close-at', {
+			description: 'Close at market price at date+time',
+			alias: 'c',
+			type: 'string',
+			group: 'Sell triggers:'
+		})
+		.option('stop-loss', {
+			description: 'Set stop loss at % or value',
+			alias: 's',
+			type: 'string',
+			group: 'Sell triggers:'
+		})
+		.option('take-profit', {
+			description: 'Set take profit at % or value',
+			alias: 't',
+			type: 'string',
+			group: 'Sell triggers:'
+		})
+	})
+	.command('close <mode> <name>', 'Sell a position in market or limit mode', (yargs) => {
+		yargs.positional('mode', {
+			description: `Trading mode`,
+			choices: [ 'market', 'limit' ]
+		})
+		yargs.positional('name', {
+			description: 'The position to close',
+			type: 'string'
+		})
+		.option('limit', {
+			description: 'Minimum price of product',
+			alias: 'l',
+			type: 'number',
+			group: 'Trade details:'
+		})
+	})
+	.command('cancel <name>', 'Cancel pending buy or sell order on position', (yargs) => {
+		yargs.positional('name', {
+			description: 'The position to close',
+			type: 'string'
+		})
+	})
+	.command('adjust <name>', 'Adjust sell triggers for a position', (yargs) => {
+		yargs.positional('name', {
+			description: 'The position to close',
+			type: 'string'
+		})
+		.option('close-at', {
+			description: 'Close at market price at date+time',
+			alias: 'c',
+			group: 'Sell triggers:'
+		})
+		.option('stop-loss', {
+			description: 'Set stop loss at % or value',
+			alias: 's',
+			group: 'Sell triggers:'
+		})
+		.option('take-profit', {
+			description: 'Set take profit at % or value',
+			alias: 't',
+			group: 'Sell triggers:'
+		})
+	})
+	.command('panic', 'Close all open positions at market price', (yargs) => {
+		// yargs.positional('mode', {
+		// 	description: `Trading mode`,
+		// 	choices: [ 'market', 'limit' ]
+		// })
+		yargs.option('force', {
+			description: 'Do not ask for confirmation',
+			type: 'boolean',
+			default: false,
+			group: 'Modifiers:'
+		})
+	})
+	.command('list-positions <filter>', 'List positions and results', (yargs) => {
+		yargs.positional('filter', {
+			description: `Filter list`,
+			choices: [ 'all', 'new', 'open', 'closed' ]
+		})
+		.option('raw', {
+			description: 'Output in raw (json) format',
+			type: 'boolean',
+			default: false
+		})
+		.option('csv', {
+			description: 'Output in csv format',
+			type: 'boolean',
+			default: false
+		})
+	},
+		function (yargs) { listPositions(yargs); g_commandLineHandled = true; }
+	)
+	.command('get-position <name>', 'Get position details', (yargs) => {
+		yargs.positional('name', {
+			description: `Name of the position`
+		})
+		.option('raw', {
+			description: 'Output in raw (json) format',
+			type: 'boolean',
+			default: false
+		})
+	},
+		function (yargs) { getPosition(yargs); g_commandLineHandled = true; }
+	)
+	.command('get-ticker <product>', 'Display ticker information', (yargs) => {
 		yargs.positional('product', {
 			description: 'The product to display ticker for',
 			type: 'string',
@@ -1325,15 +2130,15 @@ function parseCommandLine()
 	},
 		function (yargs) { getTicker(yargs); g_commandLineHandled = true; }
 	)
-	.command('prices <product>', 'Display price history <product>', (yargs) => {
+	.command('list-prices <product>', 'Display price history <product>', (yargs) => {
 		yargs.positional('product', {
 			description: 'The product to display price history for',
 			type: 'string',
 			default: 'BTC-EUR'
 		})
-		.option('days', {
+		.option('periods', {
 			description: 'Number of days to get price history for',
-			alias: ['d','periods'],
+			alias: ['d','days','p'],
 			type: 'number',
 			default: 10
 		})
@@ -1372,12 +2177,11 @@ function parseCommandLine()
 	.command('analyze <product>', 'Analyze tradability for <product>', (yargs) => {
 		yargs.positional('product', {
 			description: 'The product to display price history for, e.g. BTC-EUR',
-			type: 'string',
-			default: 'BTC-EUR'
+			type: 'string'
 		})
-		.option('days', {
-			description: 'Number of days to analyze price history for',
-			alias: ['d','periods'],
+		.option('periods', {
+			description: 'Number of periods to analyze price history for',
+			alias: ['d','days','p'],
 			type: 'number',
 			default: 10
 		})
@@ -1415,12 +2219,6 @@ function parseCommandLine()
 			type: 'boolean',
 			default: false
 		})
-		.option('stoploss', {
-			description: 'Percentage to calculate stoploss, e.g. 9.75 (%)',
-			type: 'number',
-			default: 9.75,
-			alias: 's'
-		})
 		.option('raw', {
 			description: 'Output raw (json) results',
 			type: 'boolean',
@@ -1429,7 +2227,7 @@ function parseCommandLine()
 	},
 		function (yargs) { analyze(yargs); g_commandLineHandled = true; }
 	)
-	.command('getorder <orderid>', 'Display detailed order information', (yargs) => {
+	.command('get-order <orderid>', 'Display detailed order information', (yargs) => {
 		yargs.positional('orderid', {
 			description: "The order id to look up",
 			alias: 'o',
@@ -1439,7 +2237,7 @@ function parseCommandLine()
 	},
 		function (yargs) { getOrder(yargs); g_commandLineHandled = true; }
 	)
-	.command('info <product>', 'Display product information', (yargs) => {
+	.command('get-product <product>', 'Display product information', (yargs) => {
 		yargs.positional('product', {
 			description: "The product to look up, e.g. BTC-EUR",
 			type: 'string',
@@ -1449,7 +2247,6 @@ function parseCommandLine()
 		function (yargs) { productInfo(yargs); g_commandLineHandled = true; }
 	)
 	.option('verbose', {
-		alias: 'v',
 		description: 'Enable verbose logging',
 		type: 'boolean',
 	})
@@ -1468,7 +2265,7 @@ function parseCommandLine()
 	return argv;
 }
 
-async function main() 
+async function main()
 {
 	const argv = parseCommandLine();
 	
@@ -1499,6 +2296,38 @@ async function main()
 	{
 		await monitor(argv);
 	}
+	else if ( argv._[0] == 'buy' )
+	{
+		await buy( argv );
+	}
+	else if ( argv._[0] == 'sell' )
+	{
+		await sell( argv );
+	}
+	else if ( argv._[0] == 'cancel-order' )
+	{
+		await cancelOrder( argv );
+	}
+	else if ( argv._[0] == 'open' )
+	{
+		await open( argv );
+	}
+	else if ( argv._[0] == 'close' )
+	{
+		await close( argv );
+	}
+	else if ( argv._[0] == 'cancel' )
+	{
+		await cancel( argv );
+	}
+	else if ( argv._[0] == 'adjust' )
+	{
+		await adjustPosition( argv );
+	}
+	else if ( argv._[0] == 'panic' )
+	{
+		await panic( argv );
+	}
 	else if (! g_commandLineHandled )
 	{
 		logger.trace("Missing command, returning help hint message.");
@@ -1513,4 +2342,43 @@ async function main()
 	}
 }
 
-main();
+async function checkIfServerIsRunning()
+{
+	redis = rediswrapper.getRedisClientSingleton();
+	res = await redis.getAsync("server.heartbeat");
+	if ( res == null )
+	{
+		console.log("Server is not running, start with './server.js safe'.");
+		exit( 1 );
+	}
+}
+
+async function supermain()
+{
+	try 
+	{
+		await checkIfServerIsRunning();
+		await main();
+	} 
+	catch( e )
+	{
+		if ( e.constructor.name == 'UserError' )
+		{
+			if ( e.message == 'Not implemented.' )
+				e.message = 'Not implemented. (Check for updated versions on https://github.com/dfient/coinbase-bot/)';
+
+			console.log( e.message );
+			exit( 1 );
+		}
+		else
+		{
+			throw e;
+		}
+	}
+	finally
+	{
+		rediswrapper.closeRedisSingleton();
+	}
+}
+
+supermain();

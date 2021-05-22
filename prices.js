@@ -1,5 +1,62 @@
 #!/usr/bin/env node
 
+/*
+
+COINBASE-BOT
+
+MIT License
+
+Copyright (c) 2021 dfient@protonmail.ch; https://github.com/dfient/coinbase-bot
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--
+
+Module:         Imports market data into postgres
+
+Description:    This module is an entrypoint module meant to be called by users
+                of the application. It uses the Coinbase public api to download
+				historical tickers for a product, syncing this to the pricehistory
+				table in postgres.
+
+				Subsequent calls will incrementally update the product information
+				until the last available ticker.
+
+				Administrators typically use 'at' or 'crontab' to schedule
+				runs of this in accordance with the --granularity option they want.
+
+				Users can connect to the database using Excel, Tableau, PowerBI
+				or similar to analyse the market data.
+
+				./trade.js commands 'analyze', 'monitor' and 'auto' will use this
+				data in future versions (currently they are accessing the public
+				api's which introduce restrictions).
+
+				Future versions should have ./server.js orchestrate timing of
+				incremental updates to the price database.
+
+Schema:         See ./schema/pricehistory.psql for table definition.
+
+Usage:          Run './prices.js --help' for usage information.
+
+*/
+
 const tools = require('./tools');
 const clc = require('cli-color');
 const logger = require('./logger').log;
@@ -54,7 +111,6 @@ function handleCommandLine()
 		(yargs) => { syncAllPrices(yargs.granularity) }
     )
 	.option('verbose', {
-		alias: 'v',
 		description: 'Enable verbose logging',
 		type: 'boolean',
 	})
@@ -69,7 +125,7 @@ async function syncAllPrices(granularity)
 {
 	const DEFAULT_START_DATE = new Date( new Date(2019,1-1,1).getTime() - (granularity * 1000));
 
-	const products = ['BTC-EUR', 'ETH-EUR', 'LTC-EUR', 'ADA-EUR', 'LINK-EUR', 'SUSHI-EUR'];
+	const products = APIKeys.TRADING_PRODUCTS;
 	
 	for ( const product of products )
 		await syncPrices(product, granularity, DEFAULT_START_DATE);
@@ -149,7 +205,7 @@ async function getPriceHistoryAndWriteToDatabase(client, product, startDate, end
 var lastApiCall = null;
 async function getPriceHistory(product, startDate, endDate, granularity)
 {
-	const MIN_TIME_BETWEEN_PUBLIC_API_CALLS = 333;
+	const MIN_TIME_BETWEEN_PUBLIC_API_CALLS = 350;
 
 	if ( lastApiCall != null )
 	{

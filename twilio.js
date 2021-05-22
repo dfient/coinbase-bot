@@ -1,3 +1,46 @@
+/*
+
+COINBASE-BOT
+
+MIT License
+
+Copyright (c) 2021 dfient@protonmail.ch; https://github.com/dfient/coinbase-bot
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--
+
+Module:         Wrapper module for Twilio API to send SMS notifications.
+
+Description:    Used by trade.js to notify admin of trades and signals.
+
+Dependencies:	Configuration in apikeys.js
+
+Notes:          This module has a circuit breaker to avoid excessive
+                charges by Twilio + automatic refill of account balance.
+                It will stop sending messages is more than >50 messages
+                is sent in one hour.
+
+*/
+
+
+
 const APIKeys = require("./apikeys");
 var logger = require('./logger').log.child({module:'twilio'});
 
@@ -65,7 +108,7 @@ module.exports.sendTextMessage = function(message)
     .create({
         to: APIKeys.SMS_TO_NUMBER,
         from: APIKeys.SMS_FROM_NUMBER,
-        body: message,
+        body: `${message} + (${new Date().toLocaleString()})`,
     })
     .then(message => { 
         logger.debug(message.sid, "Twilio sms sent.");
@@ -87,7 +130,7 @@ module.exports.sendTextMessageAsync = async function(message)
     .create({
         to: APIKeys.SMS_TO_NUMBER,
         from: APIKeys.SMS_FROM_NUMBER,
-        body: message,
+        body: `${message} + (${new Date().toLocaleString()})`,
     })
     .then(message => { 
         logger.debug(message.sid, "Twilio sms sent.");

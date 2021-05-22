@@ -1,28 +1,414 @@
 #!/usr/bin/env node
 
+/*
+
+COINBASE-BOT
+
+MIT License
+
+Copyright (c) 2021 dfient@protonmail.ch; https://github.com/dfient/coinbase-bot
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--
+
+Module:         Maintains connection to the Coinbase websocket feed and
+                publishes the information to coinbase-bot modules through
+				Redis and Postgres.
+
+Description:    This module is an entrypoint module meant to be called by users
+                of the application.
+
+				'trade.js' depends on this module to be running to function
+				properly (this lets us overcome api throttling restrictions at
+				Coinbase).
+
+Usage:          Run './server.js --safe' to start the server.
+
+                Use screen or set up as a daemon to ensure it stays up.
+
+Notes:			This module is reaching a point where it needs some major
+                refactoring both for readability and maintainabilily, and most
+				importantly to ensure we keep separation of concerns and reduce
+				impact of possible bugs/crashes (position management especially).
+
+				IMPROVEMENT: With positions we're introducing more complexity in this 
+				module. We should ideally just post messages to redis, and let 
+				another subscriber handle the gory details of talking to the database.
+
+				IMPROVEMENT: We're doing multiple writes to the redis cache for
+				some messages. Operations to redis can be grouped together, this
+				is a possible performance improvement at the cost of readability.
+				Suited for a later stage in the process as we stabilize.
+
+				IMPROVEMENT: Currently using sets for orders:open and orders:completed.
+				We're checking order status through order:<orderid>.status (hash),
+				but if we check using :open or :completed we should change this to a
+				sorted set for performance. DISCUSSION: The module that handles
+				updates to positions can use either orders:completed or the orderfeed.
+
+				IMPROVEMENT: We should publish information about positions changing
+				to make the system easily extendible.
+
+Weakness:		We may lose messages for a variety of reasons, local crashes,
+                connection problems, or coinbase faults. Coinbase sends a sequence
+				number that we should track. The critical part here is order
+				management. We have open orders listed in redis orders:open
+				and on start of the server we should use the private api to
+				check the status of all of these, then manually trigger completed
+				actions for each of them.
+
+*/
+
 const logtool = require('./logger');
 var logger = logtool.log;
 
 const tools = require('./tools');
 const clc = require('cli-color');
 const yargs = require('yargs');
-const redis = require('redis');
+const redis = require('./rediswrapper');
+const pgw = require('./pgwrapper');
 const { spawn } = require('child_process');
 
 var coinbase = require('./coinbase');
+const positions = require('./positions');
 
 const CoinbasePro = require('coinbase-pro');
 var APIKeys = require('./apikeys');
 const { boolean } = require('yargs');
-
 
 const MAX_SILENT_TIME_SEC = 90;
 var lastMessageReceived = new Date();  // used to check heartbeat received and connection is good
 
 
 
+main();
+
+
+
+async function main()
+{
+	parseCommandLine();
+}
+
+
+
+function parseCommandLine()
+{
+    const argv = yargs
+	.command('start', 'Start the server modules and monitor for failure', {
+        // budget: {
+        //     description: 'the amount of money to buy for',
+        //     alias: 'b',
+        //     type: 'number',
+        //     demandOption : true
+        },
+		(yargs) => { setupLogging(yargs); startServerProcesses(yargs) }
+    )
+	.command(
+		'get-ticker', 
+		'[DEPRECATED] Display ticker information <product>. Use trade.js get-ticker instead.', 
+		(yargs) => {
+		   yargs.positional('product', {
+			description: 'the product to display ticker for, e.g. EUR-BTC',
+			type: 'string'
+		   })
+		   .option('raw', {
+			   description: 'Output raw data (json), default is human readable',
+			   type: 'boolean',
+			   default: false
+		   })
+		},
+		(yargs) => { setupLogging(yargs); displayTicker(yargs) }
+    )
+	.command('exchange-connector', false, {
+        // budget: {
+        //     description: 'the amount of money to buy for',
+        //     alias: 'b',
+        //     type: 'number',
+        //     demandOption : true
+        },
+		(yargs) => { setupLogging(yargs); startExchangeConnection(yargs) }
+    )
+	.command('position-manager', false, {
+        // budget: {
+        //     description: 'the amount of money to buy for',
+        //     alias: 'b',
+        //     type: 'number',
+        //     demandOption : true
+        },
+		(yargs) => { setupLogging(yargs); startPositionManager(yargs) }
+    )
+	.option('verbose', {
+		description: 'Enable verbose logging',
+		type: 'boolean',
+		default: false
+	})
+	.option('logfilename', {
+		description: 'Choose alternate log file name',
+		type: 'string'
+	})
+    .help()
+    .alias('help', 'h')
+	.alias('start', 'safe')
+    .argv;
+
+    return argv;
+}
+
+
+
+function setupLogging(argv)
+{
+	if ( argv.logfilename != null )
+	{
+		if ( argv.logfilename == 'console' )
+			logger = logtool.setLogToConsole();
+		else
+			logger = logtool.setLogFileName(argv.logfilename);
+	}
+	else
+	{
+		logger = logtool.setLogFileName("log_server.json");
+	}
+	
+	logger.level = argv.verbose ? 'trace' : 'debug';
+	logger.info('Starting bitbot server.js, loglevel: ' + logger.level);
+
+	coinbase.updateLogger( logger );
+}
+
+
+
+async function displayTicker( yargs )
+{
+	//
+	// This was included early as a test function, and has no real value now that the system has stabilized
+	// and the same function is available through trade.js get-ticker. The difference between the two is that
+	// this one has no fallback to api if the redis key has expired.
+	// 
+	// Will be removed from future versions
+	//
+
+	try 
+	{
+		var product = yargs._[1];
+
+		// Retrieving from redis, requiring that server is running or this is stale
+
+		const redisClient = redis.getRedisClientSingleton();
+		var tickerJson = await redisClient.getAsync( 'ticker.' + product );
+		if ( tickerJson == null )
+		{
+			console.log('Ticker not found, is server running?');
+			exit( 1 );
+		}
+		
+		var data = JSON.parse(tickerJson);
+		var msgTime = Date.parse(data.time);
+
+		// See assumptions.md
+		// 900 seconds max for ticker, IMPROVEMENT use global constant, see coinbase.getTicker and ticker message handler above
+		if ( new Date() - msgTime > 900 * 1000 ) 
+		{
+			console.error("Note! Ticker outdated, is server running?");
+		}
+
+		if ( yargs.raw )
+			console.log(data);
+		else
+			console.log(product, "Bid:", data.best_bid, "Ask:", data.best_ask, "Spread:", (Math.abs(data.best_bid - data.best_ask)).toFixed(2), "Timestamp:", data.time);
+	} 
+	catch (error) 
+	{
+		throw error;	
+	}
+	finally 
+	{
+		redis.closeRedisSingleton();
+	}
+	
+}
+
+
+
+async function startServerProcesses(yargs)
+{
+	console.log("Starting server and child processes. Press Ctrl-C to exit.");
+
+	// while( true )
+	// {
+	// 	var exChild = spawn('node', ["./server.js", "exchange-connector"] );
+	// 	console.log("Server running as pid:", exChild.pid);
+
+	// 	var stopped = false;
+	// 	exChild.on('exit', function(code) {
+	// 		console.log('Child process stopped, restarting.');
+	// 		stopped = true;
+	// 	});
+
+	// 	exChild.stdout.on('data', (data) => {
+	// 		process.stdout.write('XC: ' + data);
+	// 	});
+
+	// 	while( !stopped )
+	// 		await tools.sleep(1000);
+	// }
+
+	var positions_manager = null;
+	var restart_positions_manager = true;
+
+	var exchange_connector = null;
+	var restart_exchange_connector = true;
+
+	while( true )
+	{
+
+		if ( restart_positions_manager )
+		{
+			restart_positions_manager = false;
+
+			positions_manager = spawn('node', ["./server.js", "position-manager"] );
+			console.log("Positions Manager (PM) running as pid:", positions_manager.pid);
+
+			positions_manager.on('exit', function( code ) {
+				console.log('Position Manager stopped, restarting.');
+				restart_positions_manager = true;
+			});
+			
+			positions_manager.stdout.on('data', (data) => {
+				process.stdout.write('PM: ' + data);
+			});
+		}
+
+		// We start the exchange connector last to make sure subscribers are able to
+		// receive messages once we're connected to the exchange
+
+		if ( restart_exchange_connector )
+		{
+			restart_exchange_connector = false;
+
+			exchange_connector = spawn('node', ["./server.js", "exchange-connector"] );
+			console.log("Exchange Connector (EX) running as pid:", exchange_connector.pid);
+
+			exchange_connector.on('exit', function( code ) {
+				console.log('Exchange Connector stopped, restarting.');
+				restart_exchange_connector = true;
+			});
+
+			exchange_connector.stdout.on('data', (data) => {
+				process.stdout.write('XC: ' + data);
+			});
+		}
+		
+		await tools.sleep( 1000 );
+	}
+}
+
+
+
+/* ********************************************************************
+
+   EXCHANGE CONNECTION SUBPROCESS
+
+   This process is managed by 'server.js start'. It connects to the
+   Coinbase websocket and subscribes to product, ticker, order
+   channels and notifies our other processes through redis
+   pubsub and keys.
+
+   It is critical that this process is running. We have a circuit
+   breaker that fires if we have no new messages for X seconds
+   and then abort the process - we can therefore not have any longrunning
+   tasks in this - just message pushing. Our parent (./server.js start)
+   will restart us if we exit.
+
+*/
+
+
+
+async function startExchangeConnection(yargs)
+{
+	try
+	{
+		const redisServer = redis.getRedisClientSingleton();
+		websocket = coinbaseListener(redisServer);
+
+		setInterval( checkExchangeConnectionHeartbeat, 10000 );
+
+		console.log('Exchange Connector running. (Press Ctrl-C to quit.)');
+		await tools.keypress();
+
+		websocket.disconnect();
+
+		console.log('Exchange Connector stopped.');
+	}
+	finally
+	{
+		redis.closeRedisSingleton();
+	}
+}
+
+
+
+function checkExchangeConnectionHeartbeat()
+{
+	var currentTime = new Date();
+	var timeSinceLastMessage = currentTime.getTime() - lastMessageReceived.getTime();
+
+	if ( timeSinceLastMessage > MAX_SILENT_TIME_SEC * 1000 )
+	{
+		 console.log("Heartbeat stopped, aborting server. Time since last message:", timeSinceLastMessage);
+		 logger.error({ lastMessage: lastMessageReceived, timeSince: timeSinceLastMessage }, "Heartbeat stopped, aborting server.");
+
+		process.abort();
+	}
+}
+
+
+
+async function coinbaseListener(redisServer)
+{
+	const websocket = new CoinbasePro.WebsocketClient( APIKeys.TRADING_PRODUCTS, 'wss://ws-feed.pro.coinbase.com',
+		{
+			key: APIKeys.API_KEY,
+			secret: APIKeys.API_SECRET,
+			passphrase: APIKeys.API_PASS
+		},
+		{
+			channels: [ 'ticker', 'user', 'status' ] //, 'level2' ]
+		}
+	);
+
+	websocket.on('message', (data) => {
+		handleCoinbaseMessage(data, redisServer);
+	});
+
+	return websocket;
+}
+
+
+
 async function handleCoinbaseMessage(data, redisServer)
 {
+	// IMPROVEMENT: This function has outgrown itself and needs refactoring, split each message
+	// handler into functions and reuse parts for ie received and activate
+
 	// We must handle the heartbeats; if no heartbeat received in 10 seconds, we must restart the server
 	// and somehow sync up on our orders on start
 
@@ -35,21 +421,28 @@ async function handleCoinbaseMessage(data, redisServer)
 	// push message on for generic consumption
 
 	data.x_server_time = new Date();
-	redisServer.publish(data.type, JSON.stringify(data)); // not sure if we need this? but nice for dev and debug.
+	
+	// IMPROVEMENT: We do not need this full stream, but it can be nice for extensibility
+	// and custom development. Parameterize this, e.g. --full-stream to enable
+	// We may need the L2 order book as well so this would be very verbose
+	redisServer.publish("fullfeed", JSON.stringify(data)); 
 
 
 	// specific handling of messages
 
 	if  ( data.type == 'ticker' )
 	{
-		const TICKER_TTL_SECONDS = 120; // TODO: Must be set to something else?
+		const TICKER_TTL_SECONDS = 60 * 15; // TODO: Must be set to something else?
 
 		redisServer.set('ticker.' + data.product_id, JSON.stringify(data), 'EX', TICKER_TTL_SECONDS);
 		redisServer.publish('tickerfeed', JSON.stringify(data));
 	}
-	else if ( data.type == 'l2update')
+	else if ( data.type == 'l2update' || data.type == 'snapshot ')
 	{
-		null;
+		// This will not trigger, we're not subscribing to l2updates atm
+		// this can be changed in coinbaselistener()
+		
+		redisServer.set('level2:' + data.product_id, JSON.stringify(data));
 	}
 	else if ( data.type == 'subscriptions' )
 	{
@@ -79,7 +472,7 @@ async function handleCoinbaseMessage(data, redisServer)
 	// TODO: Maintain a single order view, combining the unique information in each
 	// order message. This is order:<id> in redis. There is different information
 	// in each step of the process, giving us status, fees, etc.
-	// When the order is done, either cancelled or filled, we should also push
+	// When the order is done, either canceled or filled, we should also push
 	// it to postgres to store.
 	else if ( data.type == 'received' )
 	{
@@ -124,19 +517,31 @@ async function handleCoinbaseMessage(data, redisServer)
 		if ( data.client_oid && data.client_oid.length > 0 )
 		{
 			logger.trace( { client: data.client_oid, order: data.order_id }, 'Mapping client_id to order_id in redis.');
-			redisServer.set('clientid:' + data.client_oid, data.order_id);
+			redisServer.hset('cid:' + data.client_oid, 'order_id', data.order_id); // this is replacing the line above in work with positions
 		}
 
 
 		// Store last order status and add to set which is order history
 
 		const record_id = 'order:' + data.order_id;
-		redisServer.sadd( record_id + ':history', JSON.stringify(data));
+		redisServer.rpush( record_id + ':history', JSON.stringify(data));
 
 
 		// Mark as open order
 
 		redisServer.sadd( "orders:open", data.order_id );
+
+
+		// Now that we have the order, we must make a connection betweent the order and the position
+		// We don't know if the order has a matching position, so we must check this on cid:<clientid>[position]
+		// order:<orderid>:position - value:position_name
+
+		var position_name = await redisServer.hgetAsync('cid:' + data.client_oid, 'position');
+		if ( position_name != null )
+		{
+			// Yes, this order is tracked by a position, let's create the mapping
+			redisServer.hset( 'order:' + data.order_id, 'position', position_name );
+		}
 
 		
 		// Console output
@@ -170,7 +575,7 @@ async function handleCoinbaseMessage(data, redisServer)
 		// Add this event to the order history
 		
 		const record_id = 'order:' + data.order_id;
-		redisServer.sadd( record_id + ':history', JSON.stringify(data) );
+		redisServer.rpush( record_id + ':history', JSON.stringify(data) );
 
 		
 		// Console output
@@ -203,19 +608,31 @@ async function handleCoinbaseMessage(data, redisServer)
 		if ( data.client_oid && data.client_oid.length > 0 )
 		{
 			logger.trace( { client: data.client_oid, order: data.order_id }, 'Mapping client_id to order_id in redis.');
-			redisServer.set('clientid:' + data.client_oid, data.order_id);
+			redisServer.hset('cid:' + data.client_oid, 'order_id', data.order_id); // this is replacing the line above in work with positions
 		}
 
 		
 		// Add this event to the order history
 		
 		const record_id = 'order:' + data.order_id;
-		redisServer.sadd( record_id + ':history', JSON.stringify(data) );
+		redisServer.rpush( record_id + ':history', JSON.stringify(data) );
 
 
 		// Mark as open order
 
 		redisServer.sadd( "orders:open", data.order_id );
+
+
+		// Now that we have the order, we must make a connection betweent the order and the position
+		// We don't know if the order has a matching position, so we must check this on cid:<clientid>[position]
+		// order:<orderid>:position - value:position_name
+
+		var position_name = await redisServer.hgetAsync('cid:' + data.client_oid, 'position');
+		if ( position_name != null )
+		{
+			// Yes, this order is tracked by a position, let's create the mapping
+			redisServer.hset( 'order:' + data.order_id, 'position', position_name );
+		}
 
 
 		// Console output
@@ -265,24 +682,41 @@ async function handleCoinbaseMessage(data, redisServer)
 
 
 		// Add the match to the order history
+		var order_id = null;
+		var fee = 0.0;
 
 		if ( data.user_id == data.taker_user_id )
 		{
-			redisServer.sadd('order:' + data.taker_order_id + ':history', JSON.stringify( data ));
+			redisServer.rpush('order:' + data.taker_order_id + ':history', JSON.stringify( data ));
 			
 			console.log("Match taker", data.product_id, "size", data.size, "price", data.price, "fee", data.taker_fee_rate, `(${data.taker_order_id})`);
+
+			fee = data.taker_fee_rate;
+			order_id = data.taker_order_id;
 		}
 		else
 		{
-			redisServer.sadd('order:' + data.maker_order_id + ':history', JSON.stringify( data ));
+			redisServer.rpush('order:' + data.maker_order_id + ':history', JSON.stringify( data ));
 
 			console.log("Match maker", data.product_id, "size", data.size, "price", data.price, "fee", data.maker_fee_rate, `(${data.maker_order_id})`);
+
+			fee = data.maker_fee_rate;
+			order_id = data.maker_order_id;
 		}
 
+		// Update the order with match information, as we can have multiple match messages for larger orders,
+		// we increment the values. Note: We may submit a market order for €1, but executed value can be less
+		// This will affect budget maintenance in auto trading mode. Ie if minimum size of base is 1 and
+		// price is <1€, the executed value will be equal to the price of the product, i.e. 0.56555
+		// So don't just multiple input parameters... ;)
+
+		redisServer.hincrbyfloat('order:' + order_id, 'executed_size', data.size);
+		redisServer.hincrbyfloat('order:' + order_id, 'executed_value', data.size * data.price);
+		redisServer.hincrbyfloat('order:' + order_id, 'accumulated_fees', fee);
 	}
 	else if ( data.type == 'done' )
 	{
-		// cancelled stoploss order
+		// canceled stoploss order
 		// {
 		// 	order_id:'07a26445-6e24-4296-b4f9-526c99a2a41a'
 		// 	price:'0.1'
@@ -317,17 +751,21 @@ async function handleCoinbaseMessage(data, redisServer)
 
 		// Set status of this order
 		
-		redisServer.set( record_id + ':status', data.reason );
+		redisServer.hset( record_id, 'status', data.reason );
 		
 
 		// Add this event to the order history
 		
-		redisServer.sadd( record_id + ':history', JSON.stringify(data) );
+		redisServer.rpush( record_id + ':history', JSON.stringify(data) );
 		
 		
 		// Remove from list of open orders, move to completed and publish
 
 		redisServer.smove( "orders:open", "orders:completed", data.order_id );
+		
+
+		// Publish that we have a completed order
+
 		redisServer.publish( "orderfeed", data.order_id );
 
 
@@ -347,198 +785,278 @@ async function handleCoinbaseMessage(data, redisServer)
 	redisServer.set('server.heartbeat', new Date().toISOString(), 'EX', SERVER_HEARTBEAT_TTL_SECONDS);
 }
 
-async function coinbaseListener(redisServer)
+
+
+/* ********************************************************************
+
+   POSITIONS MANAGER SUBPROCESS
+   ./server.js positions-manager
+
+   This process is also managed by 'server.js start'. It listens
+   to messages from the exchange-connector and for orders that match
+   a position, it updates the position in the database.
+
+   It also handles auto-closing of positions based on the take_profit,
+   stop_loss and close_at_time fields.
+
+*/
+
+var open_positions = [];
+
+async function startPositionManager(yargs)
 {
-	const websocket = new CoinbasePro.WebsocketClient( APIKeys.TRADING_PRODUCTS, 'wss://ws-feed.pro.coinbase.com',
-		{
-			key: APIKeys.API_KEY,
-			secret: APIKeys.API_SECRET,
-			passphrase: APIKeys.API_PASS
-		},
-		{
-			channels: [ 'ticker', 'user', 'status' ] //, 'level2' ]
-		}
-	);
+	var orderfeed = null;
 
-	websocket.on('message', (data) => {
-		handleCoinbaseMessage(data, redisServer);
-	});
-
-	return websocket;
-}
-
-function checkHeartbeat()
-{
-	var currentTime = new Date();
-	var timeSinceLastMessage = currentTime.getTime() - lastMessageReceived.getTime();
-
-	if ( timeSinceLastMessage > MAX_SILENT_TIME_SEC * 1000 )
+	try
 	{
-		 console.log("Heartbeat stopped, aborting server. Time since last message:", timeSinceLastMessage);
-		 logger.error({ lastMessage: lastMessageReceived, timeSince: timeSinceLastMessage }, "Heartbeat stopped, aborting server.");
+		// Load open positions, we're tracking them for close_at_time, take-profit and stop-loss
+		// IMPROVEMENT: Send redis pubsub msg when positions change to force immediate refresh over interval based
+		
+		pm_refresh_positions();
 
-		process.abort();
-	}
-}
+		setInterval( pm_refresh_positions, 30 * 1000 );
 
-async function startServer(yargs)
-{
-	const redisServer = redis.createClient();
-	redisServer.on("error", (error) => {
-		logger.error(error, "Redis error");
-	});
 
-	websocket = coinbaseListener(redisServer);
+		// timer to check if any positions are set to be closed at specific time
 
-	setInterval( checkHeartbeat, 10000 );
+		setInterval( pm_handle_timer, 1 * 1000 );
+		
+		
+		// set up a pubsub listener for orders and tickers
 
-	console.log('Server running. Press Ctrl-C to abort.');
-	await tools.keypress();
-
-	websocket.disconnect();
-	redisServer.end();
-
-	console.log('Server stopped.');
-}
-
-async function wrapServer(yargs)
-{
-	console.log("Starting server as child process. Press Ctrl-C to exit.");
-
-	while( true )
-	{
-		var child = spawn('node', ["./server.js", "start"] );
-		console.log("Server running as pid:", child.pid);
-
-		var stopped = false;
-		child.on('exit', function(code) {
-			console.log('Child process stopped, restarting.');
-			stopped = true;
+		orderfeed = redis.getRedisClient();
+		orderfeed.on("message", function( channel, message ) {
+			if ( channel == 'orderfeed' )
+			{
+				pm_handle_order( message );
+			}
+			else if ( channel == 'tickerfeed' )
+			{
+				pm_handle_ticker( JSON.parse( message ) );
+			}
 		});
 
-		child.stdout.on('data', (data) => {
-			process.stdout.write('Child: ' + data);
-		});
+		orderfeed.subscribe('orderfeed', 'tickerfeed');
+		
+		console.log('Positions Manager running. (Press Ctrl-C to quit.)');
+		await tools.keypress();
 
-		while( !stopped )
-			await tools.sleep(1000);
+		orderfeed.close();
+		orderfeed = null;
+		
+		console.log('Positions Manager stopped.');
+	}
+	finally
+	{
+		if ( orderfeed != null )
+			orderfeed.quit();
 	}
 }
 
-async function displayTicker( yargs )
+
+
+async function pm_handle_order( order_id )
 {
-	var product = yargs._[1];
+	console.log( "Handling order", order_id );
 
-	// Retrieving from redis, requiring that server is running or this is stale
+	/*
+	    PSEUDOCODE:
 
-	const redisClient = redis.createClient();
-	redisClient.get('ticker.' + product, (err, tickerJson) => {
-		if ( tickerJson == null )
+	    Look up position from psql - find if we are in new or open mode
+	    If in 'new' mode, we're here b/c buy order is complete
+	        Lookup order_id hash in redis
+	            set size = hash.executed_size
+				set price = hash.executed_value / executed_size
+		    Set buy_fees = hash.accumulated_fees
+		    Set status = 'open'
+			Set buy_fill_price = avg( order:history[type=match].price )
+	    If in 'open' mode, we're here b/c sell order is complete
+		    Lookup order_id hash in redis
+			    set sell_fill_price = avg( order:history[type=match].price )
+				set close_time = now()
+				set result = hash.executed_value - (db.size*db.price) - (db.buy_fees + hash.accumulated_fees)
+			Set status = 'closed'
+	*/
+
+	try
+	{
+		const pg = pgw.getPostgresSingleton(); // adds a refcount so we keep one connection for the entire msg proc
+		const server = redis.getRedisClientSingleton();
+
+		const order_info = await server.hgetallAsync( 'order:' + order_id );
+		if ( order_info.position == null )
 		{
-			console.log('Ticker not found, is server running?');
+			console.log("Order", order_id, "is not tracked by position, ignoring.");
+			return;
 		}
-		else
+
+		const position_info = await positions.get( order_info.position );
+		console.log("Order", order_id, "for position '" + order_info.position + "'.");
+
+		if ( position_info.status == 'new' )
 		{
-			var data = JSON.parse(tickerJson);
+			// Position has been opened
 
-			var msgTime = Date.parse(data.time);
-			if ( new Date() - msgTime > 20 * 1000 ) // 20 seconds max for ticker
+			if ( order_info.status == 'done' || order_info.status == 'filled' )
 			{
-				logger.warn(data, "Ticker outdated, is server running?");
-				console.error("Note! Ticker outdated, is server running?");
-			}
+				var size = order_info.executed_size;
+				var price = order_info.executed_value / order_info.executed_size;
+				var fees = order_info.accumulated_fees;
 
-			if ( yargs.raw )
-			{
-				console.log(data);
+				await positions.updateOnCompletedBuy( order_info.position, size, price, fees );
 			}
-			else
+			else if ( order_info.status == 'canceled' )
 			{
-				console.log(product, "Bid:", data.best_bid, "Ask:", data.best_ask, "Spread:", (Math.abs(data.best_bid - data.best_ask)).toFixed(2), "Timestamp:", data.time);
+				await positions.updateOnCanceledBuy( order_info.position );
 			}
 		}
+		else if ( position_info.status == 'open' )
+		{
+			// Position may be closing
 
-		redisClient.end(true);
-	});
+			if ( order_info.status == 'done' || order_info.status == 'filled' )
+			{
+				var size = order_info.executed_size;
+				var price = order_info.executed_value / order_info.executed_size;
+				var fees = order_info.accumulated_fees;
+
+				if ( order_info.executed_size != position_info.size )
+				{
+					console.log( "Closing position sell did not sell entire quantity.", size, "vs", position_info.size );
+					logger.error( { order: order_info, position: position_info }, "Closing position sell did not sell entire quantity." );
+				}
+
+				var result = order_info.executed_value - (position_info.size * position_info.price);
+				result -= position_info.buy_fees;
+				result -= fees;
+
+				await positions.updateOnCompletedSell( order_info.position, price, fees, result );
+				
+				console.log( "Sell order was completed with result", result.toFixed(2) );
+			}
+			else if ( order_info.status == 'canceled' )
+			{
+				console.log( "Sell order was canceled, position returning to open." );
+				await positions.removeSellOrder( order_info.position );
+			}
+		}
+	} 
+	finally
+	{
+		redis.closeRedisSingleton();
+		pgw.closePostgresSingleton();
+	}
 }
 
-function setupLogging(argv)
+
+
+async function pm_handle_ticker( ticker )
 {
-	if ( argv.logfilename != null )
+	// PSEUDOCODE: Manage a table of open positions with take_profit, stop_loss set
+	// Evaluate the product and price vs these, then initiate closing of the position
+	// if price>take_profit or price<stop_loss.
+
+	//console.log( ticker );
+
+	for ( position of open_positions )
 	{
-		if ( argv.logfilename == 'console' )
-			logger = logtool.setLogToConsole();
-		else
-			logger = logtool.setLogFileName(argv.logfilename);
+		if ( ticker.product_id != position.product )
+			continue;
+
+		if ( position.status == 'soft' )
+		{
+			// TODO: Check if we're in position to open a soft position
+			// soft position := a buy order that is not placed with the exchange, but executed once market price
+			// is correct, provided there is sufficient funds available in the account. This means we can 'buy the dip'
+			// of the first product to dip, effectively hedging bets that could not be made on the exhange since a buy
+			// order locks our funds. drawback is that we most certainly become a taker, which has higher fees
+			// for high volume traders
+		}
+		else if ( position.status == 'open' )
+		{
+			// We're already selling this position
+
+			if ( position.sell_order_id != null )
+				continue;
+
+			// Order is open, check if time to sell
+
+			if ( position.take_profit && Number(position.take_profit) < Number(ticker.best_bid) )
+			{
+				// market price is higher than take_profit, sell
+				console.log( "Position", position.name, "has reached take-profit level at", Number(ticker.best_bid).toFixed(2) );
+				
+				await pm_spawn_trade_market_sell( position.name );
+				position.status = 'closed'; // artificial until we're updating the table from the database
+			}
+
+			if ( position.stop_loss && Number(ticker.best_bid) < Number(position.stop_loss) )
+			{
+				console.log( "Position", position.name, "has reached stop-loss level at", Number(ticker.best_bid).toFixed(2) );
+
+				await pm_spawn_trade_market_sell( position.name );
+				position.status = 'closed'; // artificial until we're updating the table from the database
+			}
+		}
 	}
-	else
+}
+
+
+
+async function pm_handle_timer( )
+{
+	// PSEUDOCODE: Manage a table of open positions with close_at_time set
+	// Check if current time > close_at_time, in which case we should initiate
+	// closing of the position at market price.
+
+	for ( position of open_positions )
 	{
-		logger = logtool.setLogFileName("log_server.json");
+		if ( position.status == 'open' )
+		{
+			// we're artificially updating positions when we change them here as we wait for the main db to be updated
+
+			if ( position.close_at_time && position.close_at_time < tools.now() )
+			{
+				console.log("Position", position.name, "set to close at", position.close_at_time.toLocaleString() );
+				
+				await pm_spawn_trade_market_sell( position.name );
+				position.status = 'closed'; // the artificial update to avoid sending two sell orders
+			}
+		}
 	}
+}
+
+
+
+async function pm_refresh_positions( )
+{
+	try
+	{
+		open_positions = await positions.list( 'open' );
+	}
+	catch( error )
+	{
+		logger.error( error, "Cannot update list of open positions (timer)" );
+		open_positions = [];
+	}
+}
+
+
+
+async function pm_spawn_trade_market_sell( position )
+{
+	var child = spawn('node', ["./trade.js", "close", position, "market" ] );
 	
-	logger.level = argv.verbose ? 'trace' : 'debug';
-	logger.info('Starting bitbot server.js, loglevel: ' + logger.level);
+	child.stdout.on('data', (data) => {
+		process.stdout.write('trade.js: ' + data);
+	});
 
-	coinbase.updateLogger( logger );
+	var done = false;
+	child.on('exit', function( code ) {
+		done = true;
+	});
+
+	while (!done) await tools.sleep( 100 );
+
+	console.log("Child trade.js completed.");
 }
-
-function parseCommandLine()
-{
-    const argv = yargs
-    .command('start', 'Start the server', {
-        // budget: {
-        //     description: 'the amount of money to buy for',
-        //     alias: 'b',
-        //     type: 'number',
-        //     demandOption : true
-        },
-		(yargs) => { setupLogging(yargs); startServer(yargs) }
-    )
-	.command('safe', 'Run the server as child process and restart on failure', {
-        // budget: {
-        //     description: 'the amount of money to buy for',
-        //     alias: 'b',
-        //     type: 'number',
-        //     demandOption : true
-        },
-		(yargs) => { setupLogging(yargs); wrapServer(yargs) }
-    )
-    .command(
-		'ticker', 
-		'Display ticker information <product>', 
-		(yargs) => {
-		   yargs.positional('product', {
-			description: 'the product to display ticker for, e.g. EUR-BTC',
-			type: 'string'
-		   })
-		   .option('raw', {
-			   description: 'Output raw data (json), default is human readable',
-			   type: 'boolean',
-			   default: false
-		   })
-		},
-		(yargs) => { setupLogging(yargs); displayTicker(yargs) }
-    )
-	.option('verbose', {
-		alias: 'v',
-		description: 'Enable verbose logging',
-		type: 'boolean',
-		default: false
-	})
-	.option('logfilename', {
-		description: 'Choose alternate log file name (default is log.json)',
-		type: 'string'
-	})
-    .help()
-    .alias('help', 'h')
-    .argv;
-
-    return argv;
-}
-
-async function main()
-{
-	parseCommandLine();
-}
-
-main();

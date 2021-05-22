@@ -26,61 +26,58 @@ SOFTWARE.
 
 --
 
-Module:         Misc tool functions used by other modules
+Module:         Postgres Wrapper, reference counted singleton for use 
+                in trade.js and server.js
 
-Usage:          See individually exported functions
+Description:    Sets up connection to the database using settings from
+                apikeys.js
+
+Usage:          const pgw = require('./pgwrapper')
+                try { 
+                    var m = pgw.getPostgresSingleton(); 
+                    // ... 
+                }
+                finally { 
+                    pgw.closePostgresSingleton();
+                }
 
 */
 
 
+var logger = require('./logger').log.child({module:'pgwrapper'});
 
-module.exports.sleep = function sleep(ms) 
+const APIKeys = require("./apikeys");
+const { Client } = require('pg');
+
+
+
+var connection = null;
+var refcount = 0;
+
+
+
+module.exports.getPostgresSingleton = async function( ) 
 {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+    if ( connection != null )
+    {
+        refcount++;
+        return connection;
+    }
+    
+    connection = new Client( APIKeys.POSTGRES_SETTINGS );
+	await connection.connect();
+
+    refcount++;
+    return connection;
 }
 
 
 
-module.exports.keypress = async function()
+module.exports.closePostgresSingleton = async function( )
 {
-  process.stdin.resume();
-  
-  return new Promise(resolve => process.stdin.once('data', () => 
-  {
-    process.stdin.pause();
-    resolve();
-  }
-  ));
-}
-
-
-
-module.exports.countDecimals = function(number)
-{
-  const strnum = number.toString();
-  const lastPeriod = strnum.lastIndexOf('.');
-  return lastPeriod == -1 ? 0 : strnum.length - lastPeriod - 1;
-}
-
-
-
-module.exports.getCurrencySymbolFromProduct = function(str)
-{
-  return str.indexOf( "-EUR" ) > 0 ? '€' : '$';
-}
-
-
-
-module.exports.zeroPad = function(num, places) 
-{
-  return String(num).padStart(places, '0');
-}
-
-
-
-module.exports.now = function()
-{
-  return new Date();
+    if  ( --refcount == 0 )
+    {
+        connection.end();
+        connection = null;
+    }
 }

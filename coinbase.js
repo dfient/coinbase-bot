@@ -1,25 +1,59 @@
 /*
-Wrapper for Coinbase API
 
-This lib is designed to improve readability of the trading algorithms and bots
-that use the coinbase api.
+COINBASE-BOT
 
-Atm the project is also so fragile that we are taking a few shortcuts here
-in terms of stability. E.g. returning last market price should the api call to get
-fresh data fail, or assuming a deal is not filled if the api call to check fails.
+MIT License
 
-You have to read the code to see how this works for now, this system must move to an
-event publisher-consumer model in order to support multiple trades and reliability anyway.
+Copyright (c) 2021 dfient@protonmail.ch; https://github.com/dfient/coinbase-bot
 
-Some methods should retry, others need more refactoring to avoid e.g. double orders
-being submitted while using retry mechanisms. Some just ignore errors and therefore fail.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--
+
+Module:         Wrapper for Coinbase API, providing e.g. order validation
+                and uses the Redis cache to avoid api throttling limits
+                on Coinbase.
+
+Description: 
+
+  This lib is designed to improve readability of the trading algorithms and bots
+  that use the coinbase api.
+  
+  Atm the project is also so fragile that we are taking a few shortcuts here
+  in terms of stability. E.g. returning last market price should the api call to get
+  fresh data fail, or assuming a deal is not filled if the api call to check fails.
+  
+  You have to read the code to see how this works for now, this system must move to an
+  event publisher-consumer model in order to support multiple trades and reliability anyway.
+  
+  Some methods should retry, others need more refactoring to avoid e.g. double orders
+  being submitted while using retry mechanisms. Some just ignore errors and therefore fail.
+
+  See individual exported functions for information.
 
 */
 
-// no whitelist api key, view, trade
+
 var APIKeys = require('./apikeys');
 var tools = require('./tools');
 var rediswrapper = require('./rediswrapper')
+const { v4: uuidv4 } = require('uuid');
 
 var logger = require('./logger').log.child({module:'coinbase'});
 logger.info('coinbase initializing');
@@ -59,26 +93,101 @@ module.exports.checkSandbox = async function()
   }
 }
 
-module.exports.buyLimitPrice = async function(buyPrice, buySize, productId = 'BTC-EUR') 
+module.exports.buyLimitPrice = async function( buyPrice, buySize, productId = 'BTC-EUR' ) 
 {
-  const buyParams = {
-    price: buyPrice,
-    size: buySize,
-    type: 'limit',
-    product_id: productId,
-  };
-  
-  logger.trace(buyParams, "Placing limit buy order");
-  
-  var order = await privateClient.buy( buyParams );
-  logger.info(order, 'Order placed');
-  
-  order.settled ? logger.info('Order settled immediately.') : logger.info('Order pending.');
-  
-  return order.id;
+	const productInfo = await this.getProductInfo( productId );
+	var res = await this.buyLimitPriceEx( buyPrice, buySize, productInfo );
+	return res.order_data.id;
 }
 
-module.exports.buyMarketPrice = async function(size, productId = 'BTC-EUR') 
+module.exports.buyLimitPriceEx = async function( buyPrice, buySize, productInfo, clientId = null )
+{
+	// validate purchase
+	
+	if ( buySize < productInfo.base_min_size )
+	{
+		logger.error( { size: buySize, product: productInfo }, "Size is too small for product.");
+		throw new Error("Size is too small.");
+	}
+
+
+	// setup the buy parameters, we're sending sizes as strings tailored to product precision
+	// NOTE: This means you may be buying for less than our input due to rounding (down).
+	
+	
+	const buyParams = {
+		price: Number( buyPrice ).toFixed( productInfo.x_quote_precision ),
+		size: Number( buySize ).toFixed( productInfo.x_base_precision ),
+		type: 'limit',
+		product_id: productInfo.id,
+		client_oid: clientId != null ? clientId : uuidv4()
+	};
+	
+	logger.trace(buyParams, "Placing limit buy order");
+	
+	var order = await privateClient.buy( buyParams );
+	logger.info(order, 'Order placed');
+	
+	order.settled ? logger.info('Order settled immediately.') : logger.info('Order pending.');
+	
+	var res = {
+		client_id: buyParams.client_oid,
+		order_params: buyParams,
+		order_data: order
+	};
+
+	return res;
+}
+
+module.exports.buyMarketPrice = async function(budget, productId = 'BTC-EUR') 
+{
+  var productInfo = await this.getProductInfo( productId );
+  var result = await this.buyMarketPriceEx( budget, productInfo );
+  return result.order_data.id;
+}
+
+module.exports.buyMarketPriceEx = async function( budget, productInfo, clientId = null )
+{
+  // This function does not have exception handling.
+  // An error in placing the order may mean a loss of opportunity, but not loss
+  // of funds, therefore we can leave the exception handling up to the caller?
+  // Or still have a simple retry function? (Note: this is potential loss, incorrectly
+  // placing multiple orders?)
+
+  // Validate the buy order
+
+  if ( budget < productInfo.min_market_funds )
+  {
+		logger.error( { budget: buyPrice * buySize, product: productInfo }, "Budget is too small.");
+		throw new Error("Budget is too small.");
+	}
+
+  // IMPROVEMENT? Check if we have sufficient funds in the account before submitting order?
+
+  const buyParams = {
+    funds: Number( budget ).toFixed( productInfo.x_quote_precision ),
+    type: 'market',
+    product_id: productInfo.id,
+		client_oid: clientId != null ? clientId : uuidv4()
+  };
+
+  logger.trace(buyParams, "Placing market buy order");
+
+  var order = await privateClient.buy( buyParams );
+  logger.info(order, 'Order placed.');
+
+  order.settled ? logger.info('Order settled immediately, size ' + order.filled_size) : logger.info('Order pending.');
+
+  var res = {
+		client_id: buyParams.client_oid,
+		order_params: buyParams,
+		order_data: order
+	};
+
+	return res;
+}
+
+module.exports.buyMarketPriceBySize = async function(size, productId = 'BTC-EUR') 
 {
   // This function does not have exception handling.
   // An error in placing the order may mean a loss of opportunity, but not loss
@@ -87,16 +196,16 @@ module.exports.buyMarketPrice = async function(size, productId = 'BTC-EUR')
   // placing multiple orders?)
   
   const buyParams = {
-    size: size,
-    type: 'market',
-    product_id: productId,
+      size: size,
+      type: 'market',
+      product_id: productId,
   };
-  
+
   logger.trace(buyParams, "Placing market buy order");
   
   var order = await privateClient.buy( buyParams );
-  logger.info('Order placed: ', order.id);
-  
+  logger.info(order, 'Order placed.');
+
   order.settled ? logger.info('Order settled immediately.') : logger.info('Order pending.');
   
   return order.id;
@@ -144,6 +253,65 @@ module.exports.sellAtPrice = async function(price, size, productId = 'BTC-EUR')
   logger.info(order, "Limit sell order placed");
   
   return order.id;
+}
+
+module.exports.sellAtMarketPriceEx = async function( size, productInfo, clientId = null )
+{
+  // TODO: We should check if we have available funds to sell - not just in the account, but
+  // considering any open positions (sell should not be able to interfere with positions)
+
+  if ( size < productInfo.base_min_size )
+    throw new Error("Size is too small.");
+  
+
+  const sellParams = {
+    side: 'sell',
+    type: 'market',
+    product_id: productInfo.id,
+    size: Number( size ).toFixed( productInfo.x_base_precision ),
+    client_oid: clientId != null ? clientId : uuidv4()
+  }
+  
+  
+  logger.trace(sellParams, "Placing market sell order");
+  var order = await privateClient.sell( sellParams );
+
+  var res = {
+		client_id: sellParams.client_oid,
+		order_params: sellParams,
+		order_data: order
+	};
+
+	return res;
+}
+
+module.exports.sellAtLimitPriceEx = async function( size, price, productInfo, clientId = null )
+{
+  // TODO: We should check if we have available funds to sell - not just in the account, but
+  // considering any open positions (sell should not be able to interfere with positions)
+
+  if ( size < productInfo.base_min_size )
+    throw new Error("Size is too small.");
+
+  const sellParams = {
+    side: 'sell',
+    type: 'limit',
+    product_id: productInfo.id,
+    price: Number( price ).toFixed( productInfo.x_quote_precision ),
+    size: Number( size ).toFixed( productInfo.x_base_precision ),
+    client_oid: clientId != null ? clientId : uuidv4()
+  }
+
+  logger.trace(sellParams, "Placing limit sell order");
+  var order = await privateClient.sell( sellParams );
+
+  var res = {
+		client_id: sellParams.client_oid,
+		order_params: sellParams,
+		order_data: order
+	};
+
+	return res;
 }
 
 module.exports.checkIfOrderFilled = async function(orderId, throwOnError = false) 
@@ -198,8 +366,8 @@ module.exports.checkOrderStatus = async function(orderId) // throws
   {
     redisClient = rediswrapper.getRedisClient();
     
-    const record_id = "order:" + orderId + ":status";
-    var status = await redisClient.getAsync( record_id );
+    const record_id = "order:" + orderId;
+    var status = await redisClient.hgetAsync( record_id, "status" );
 
     if ( status != null )
     {  
@@ -214,7 +382,7 @@ module.exports.checkOrderStatus = async function(orderId) // throws
   catch(e)
   {
     // do we need a fallback to direct api here if redis fails? (exception handling)
-    // if so, also handle 404 for stoploss/limit orders which means they are cancelled?
+    // if so, also handle 404 for stoploss/limit orders which means they are canceled?
     // var order = await privateClient.getOrder(orderId);
     // //logger.trace(order, 'Checking order status');
     // return order.settled;
@@ -232,7 +400,7 @@ module.exports.checkOrderStatus = async function(orderId) // throws
 module.exports.cancelOrder = async function(orderId)
 {
   // This function needs exception handling. If the order cannot be
-  // cancelled due to connection errors, we should have a retry scheme.
+  // canceled due to connection errors, we should have a retry scheme.
   
   while(true)
   {
@@ -242,7 +410,7 @@ module.exports.cancelOrder = async function(orderId)
     }
     catch(e)
     {
-      if ( e.response && e.response.statusCode == 404 ) // probably cancelled interactively by admin?
+      if ( e.response && e.response.statusCode == 404 ) // probably canceled interactively by admin?
       {
         logger.warn(e, "Order was not found, ignoring error.");
         return null;
@@ -269,16 +437,12 @@ module.exports.getMarketAskPrice = async function(productId = 'BTC-EUR')
 var lastTicker = {};
 module.exports.getTicker = async function(productId = 'BTC-EUR', apifallback = true, cachefallback = true)
 {
-  const MAX_TICKER_AGE_BEFORE_API_LOOKUP_SECONDS = 120;
+  const MAX_TICKER_AGE_BEFORE_API_LOOKUP_SECONDS = 60 * 15;
 
-  // TODO: Implement apifallback=false && cachefallback=false
   var redisClient = null;
   
   try
   {
-    // TODO: Implement validation of recency of redis ticker, if too old then get live data from server as fallback
-    // final fallback is cached version
-    
     redisClient = rediswrapper.getRedisClient();
     var tickerJson = await redisClient.getAsync('ticker.' + productId);
     var ticker = JSON.parse( tickerJson );
@@ -307,7 +471,7 @@ module.exports.getTicker = async function(productId = 'BTC-EUR', apifallback = t
     }
 
     if ( ticker )
-      logger.warn(newTicker, "Redis ticker >120s old, retrieving ticker from public api. Is server running?");
+      logger.warn(newTicker, "Redis ticker >900s old, retrieving ticker from public api. Is server running?");
     else
       logger.warn(newTicker, "Redis ticker not found, retrieving ticker from public api. Is server running?");
     
@@ -327,7 +491,7 @@ module.exports.getTicker = async function(productId = 'BTC-EUR', apifallback = t
       return ticker;
     }
 
-    throw new Error(`Ticker ${productId} is expired and apifallback== false`);
+    throw new Error(`Ticker ${productId} is expired and apifallback==false`);
 
   }
   catch(e)

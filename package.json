@@ -1,7 +1,7 @@
 {
   "name": "coinbase-bot",
-  "version": "0.0.1",
-  "description": "coinbase trading bot",
+  "version": "0.0.2",
+  "description": "coinbase trading tool with position management",
   "main": "trade.js",
   "dependencies": {
     "bluebird": "^3.7.2",
@@ -12,6 +12,7 @@
     "pino": "^6.11.2",
     "prompt": "^1.1.0",
     "redis": "^3.0.2",
+    "shortid": "^2.2.16",
     "twilio": "^3.59.0",
     "uuid": "^8.3.2",
     "yargs": "^16.2.0"
