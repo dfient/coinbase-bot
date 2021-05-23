@@ -2348,7 +2348,7 @@ async function checkIfServerIsRunning()
 	res = await redis.getAsync("server.heartbeat");
 	if ( res == null )
 	{
-		console.log("Server is not running, start with './server.js safe'.");
+		console.log("Server is not running, start with './server.js start'.");
 		exit( 1 );
 	}
 }

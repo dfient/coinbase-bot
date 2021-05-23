@@ -14,7 +14,7 @@ This tool is designed to mitigate some weaknesses in Coinbase Pro, and add tools
 ### Usage
 
 * [Introduction](introduction.md)
-* [Buy and Sell with Positions](positions.md)
+* [Trading with Positions](positions.md)
 * [Untracked Buy, Sell and Trade](buyselltrade.md)
 * [Monitoring Products and Triggers via SMS](monitor.md)
 * [Download ticker (price) history](pricesync.md)
@@ -24,6 +24,7 @@ This tool is designed to mitigate some weaknesses in Coinbase Pro, and add tools
 
 * [System requirements](systemrequirements.md)
 * [Getting started](gettingstarted.md)
+* [Upgrading (from Alpha-1)](upgrades.md)
 
 
 ### Technical Architecture
@@ -35,3 +36,9 @@ This tool is designed to mitigate some weaknesses in Coinbase Pro, and add tools
 ### Other
 
 * [Release history](releases.md)
+* [Donations](donations.md)
+
+
+
+---
+MIT License - Copyright (c) 2021 dfient@protonmail.ch; https://github.com/dfient/coinbase-bot
